@@ -18,6 +18,14 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # A host hands the crate its sqlx pools and its async-nats JetStream
+    # context: a new release of either is a breaking release of the crate,
+    # made on purpose, not a bump.
+    ignore:
+      - dependency-name: sqlx
+        versions: [">= 0.9"]
+      - dependency-name: async-nats
+        versions: [">= 0.51"]
   - package-ecosystem: npm
     directories:
       - /dashboard

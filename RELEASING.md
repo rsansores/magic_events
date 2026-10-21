@@ -54,30 +54,28 @@ runs [zizmor](https://docs.zizmor.sh) over the workflows, and a scheduled
 workflow (`advisories.yml`) looks every day for an advisory published
 against what a lockfile holds.
 
-## Once, before the first release
+## How the packages trust the workflow
 
-- In the repository's settings, **Environments → New environment**
-  `release`, with the maintainers who approve a release as its required
-  reviewers.
-- A package's first version has no one to trust yet — crates.io and npm
-  attach a Trusted Publisher only to a package that exists — so the first
-  release publishes with tokens, as the `release` environment's secrets:
-  - `CARGO_REGISTRY_TOKEN`: a crates.io token (Account Settings → API
-    Tokens) with the scopes `publish-new` and `publish-update`;
-  - `NPM_TOKEN`: an npm granular access token, read and write on packages,
-    allowed to publish new ones.
+0.1.0, the first version of each package, was published from a maintainer's
+workstation (a package must exist before a registry lets anything else
+publish it), from the release commit, the tarballs packed as the workflow
+packs them. Each package now trusts this repository's `release.yml`, in the
+`release` environment, as its publisher — Trusted Publishing:
 
-## Once, after the first release
+- **crates.io**, `magic_events_derive` and `magic_events`: owner
+  `rsansores`, repository `magic_events`, workflow `release.yml`,
+  environment `release` (each crate's **Settings → Trusted Publishing**).
+- **npm**, `magic_events_dashboard`: the same four (`npm trust list
+  magic_events_dashboard`).
 
-Make the workflow the only publisher, and delete the tokens:
+The workflow gets a token for each publication from the registry itself,
+valid for minutes, and no secret is stored: the `release` environment holds
+none. It still names `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` as a fallback,
+for a package whose trust is lost; set one as an environment secret only for
+as long as it takes to publish, and revoke it after.
 
-- **crates.io**, for each of `magic_events_derive` and `magic_events`: the
-  crate's **Settings → Trusted Publishing → Add**: owner `rsansores`,
-  repository `magic_events`, workflow `release.yml`, environment `release`.
-- **npm**, `magic_events_dashboard`: **Settings → Trusted Publisher → GitHub
-  Actions**: the same four.
-- Delete the two secrets from the `release` environment, and revoke the
-  tokens on crates.io and npm.
+The `release` environment has the maintainers who approve a release as its
+required reviewers: a publication waits for one of them.
 
 ## What CI checks before a release can happen
 
