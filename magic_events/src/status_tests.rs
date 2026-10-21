@@ -341,8 +341,10 @@ fn the_dashboards_types_are_generated_from_these() {
     matches_contract("types.ts", &text);
 }
 
-#[test]
-fn a_filter_is_a_pattern_postgresql_matches() {
+/// A filter's pattern takes, in PostgreSQL, the subjects NATS would: every
+/// character but `*` and `>` as written.
+#[sqlx::test(migrations = false)]
+async fn a_filter_is_a_pattern_postgresql_matches(pool: PgPool) {
     for (filter, subject, matches) in [
         ("shop.>", "shop.orders.north", true),
         ("shop.>", "shop", false),
@@ -350,33 +352,18 @@ fn a_filter_is_a_pattern_postgresql_matches() {
         ("shop.orders.*", "shop.orders.north.x", false),
         ("shop.orders.n+rth", "shop.orders.n+rth", true),
         ("shop.orders.n+rth", "shop.orders.nnrth", false),
-        ("shop.a-b_c", "shop.a-b_c", true),
+        ("shop_events.a-b~c{1}", "shop_events.a-b~c{1}", true),
+        ("shop_events.a-b~c{1}", "shopXevents.a-b~c{1}", false),
+        ("shop.a$b.^c", "shop.a$b.^c", true),
     ] {
-        let re = pattern(filter);
-        // The pattern is a POSIX regex PostgreSQL reads as these do.
-        let ok = posix_like(&re, subject);
-        assert_eq!(ok, matches, "{filter} {subject} {re}");
+        let found: bool = sqlx::query_scalar("SELECT $1 ~ $2")
+            .bind(subject)
+            .bind(pattern(filter))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(found, matches, "{filter} {subject} {}", pattern(filter));
     }
-}
-
-/// A tiny matcher for the patterns `pattern` writes: `^`, `$`, escaped
-/// characters, `[^.]+` and `.+`.
-fn posix_like(re: &str, s: &str) -> bool {
-    fn go(p: &[char], s: &[char]) -> bool {
-        match p {
-            ['$'] => s.is_empty(),
-            ['[', '^', '.', ']', '+', rest @ ..] => {
-                (1..=s.len()).any(|n| s[..n].iter().all(|c| *c != '.') && go(rest, &s[n..]))
-            }
-            ['.', '+', rest @ ..] => (1..=s.len()).any(|n| go(rest, &s[n..])),
-            ['\\', c, rest @ ..] => s.first() == Some(c) && go(rest, &s[1..]),
-            [c, rest @ ..] => s.first() == Some(c) && go(rest, &s[1..]),
-            [] => s.is_empty(),
-        }
-    }
-    let p: Vec<char> = re.trim_start_matches('^').chars().collect();
-    let s: Vec<char> = s.chars().collect();
-    go(&p, &s)
 }
 
 /// Ids, times, days and the test's own names made stable: each id the same
