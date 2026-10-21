@@ -56,10 +56,12 @@ async fn stopped_mid_drain_it_leaves_nothing_to_send_twice(pool: PgPool) {
         crate::emit(&mut tx, &shipped("north", n)).await.unwrap();
     }
     tx.commit().await.unwrap();
+    // One row a pass, so the drain takes seconds: stopped while it runs, not
+    // after it ran out, however fast the machine.
     let events = Events::start(
         pool.clone(),
         broker.jetstream.clone(),
-        broker.settings.clone(),
+        broker.settings.clone().batch(1).in_flight(1),
     )
     .await
     .unwrap();
