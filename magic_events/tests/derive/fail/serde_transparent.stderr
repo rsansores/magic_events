@@ -1,0 +1,5 @@
+error: `#[serde(transparent)]`: an event's body is a JSON object of its own fields, as serde writes them by default
+ --> tests/derive/fail/serde_transparent.rs:2:9
+  |
+2 | #[serde(transparent)]
+  |         ^^^^^^^^^^^

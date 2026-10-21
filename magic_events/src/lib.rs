@@ -128,10 +128,13 @@ pub trait Event: serde::Serialize + __private::Sealed {
 /// | `ce_subject` | the CloudEvents `subject` attribute, if any: text and `{field}`s, as `"{id}"` |
 /// | `crate` | the path to this crate, when a host reaches it through another: `crate = "platform::events"` — on an enum, on the enum itself |
 ///
-/// The body is the event's JSON, as serde writes it; for an enum, the JSON
-/// of the variant's own fields — the variant is in `ce-type` already. So an
-/// enum is serialized as serde does by default (externally tagged), and each
-/// variant has named fields, or wraps one value of them.
+/// The body is a JSON object: the event's fields, as serde writes them; for
+/// an enum, the variant's own fields — the variant is in `ce-type` already.
+/// So an enum is serialized as serde does by default (externally tagged),
+/// each variant has named fields or wraps one struct, and a serde attribute
+/// that writes a type as something else (`transparent`, `into`, `from`,
+/// `try_from`, `remote`) is refused. A body that is still no object — a
+/// variant wrapping a number — is refused by [`emit`].
 ///
 /// Whatever the derive cannot honour is a compile error pointing at what
 /// says it: a `{field}` that is no field, or not `Display`; a token no

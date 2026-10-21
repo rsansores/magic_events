@@ -176,17 +176,28 @@ fn subject(template: &LitStr) -> syn::Result<Vec<Vec<Part>>> {
     Ok(tokens)
 }
 
-/// The type, checked: printable ASCII with no whitespace.
+/// The longest event type, in bytes: what `emit` takes.
+const LONGEST_TYPE: usize = 255;
+
+/// The type, checked: printable ASCII with no whitespace, 255 bytes at most.
 fn event_type(ty: &LitStr) -> syn::Result<String> {
     let text = ty.value();
-    if text.is_empty() || !text.chars().all(|c| matches!(c, '!'..='~')) {
+    if text.is_empty() || text.len() > LONGEST_TYPE || !text.chars().all(|c| matches!(c, '!'..='~'))
+    {
         return Err(syn::Error::new(
             ty.span(),
-            format!("`{text}` is no event type: one is printable ASCII, with no whitespace, as `order.shipped`"),
+            format!(
+                "`{text}` is no event type: one is printable ASCII, with no whitespace, 255 \
+                 bytes at most, as `order.shipped`"
+            ),
         ));
     }
     Ok(text)
 }
+
+/// The serde attributes of a type that make its JSON something other than
+/// its fields: refused on an event, whose body is an object of its fields.
+const REFUSED_SHAPES: [&str; 5] = ["transparent", "into", "from", "try_from", "remote"];
 
 /// The version, checked: a whole number from 1.
 fn version(version: &LitInt) -> syn::Result<u32> {
@@ -361,6 +372,15 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let of = name.to_string();
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    if let Some((attr, span)) = serde_refused(&input.attrs, &REFUSED_SHAPES) {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "`#[serde({attr})]`: an event's body is a JSON object of its own fields, as \
+                 serde writes them by default"
+            ),
+        ));
+    }
     let (types, body, krate) = match &input.data {
         Data::Struct(data) => {
             let args = Args::parse(&input.attrs, false)?;
@@ -381,7 +401,6 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
             (
                 quote! { &[(#ty, #version)] },
                 quote! {
-                    #[allow(unused_variables)]
                     let Self { #(#used,)* .. } = self;
                     #describe
                 },

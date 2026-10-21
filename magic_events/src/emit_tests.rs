@@ -99,13 +99,20 @@ async fn a_rolled_back_transaction_leaves_no_event(pool: PgPool) {
 async fn a_subject_no_subject_may_hold_is_refused_at_emit(pool: PgPool) {
     Events::install(&pool).await.unwrap();
     let mut conn = pool.acquire().await.unwrap();
-    for store in ["", "a.b", "*", ">", "two words", "ñ", &"x".repeat(1025)] {
+    for store in ["", "a.b", "*", ">", "two words", "ñ"] {
         match emit(&mut conn, &shipped(store)).await {
             Err(Error::Invalid(why)) => assert!(why.contains("is no subject"), "{why}"),
             other => panic!("{store:?}: {other:?}"),
         }
     }
-    emit(&mut conn, &shipped(&"x".repeat(1024))).await.unwrap();
+    // `orders.` and `.shipped` around the store: 15 bytes of the 1 KiB.
+    match emit(&mut conn, &shipped(&"x".repeat(1024 - 14))).await {
+        Err(Error::Invalid(why)) => assert!(why.contains("1 KiB at most"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    emit(&mut conn, &shipped(&"x".repeat(1024 - 15)))
+        .await
+        .unwrap();
     assert_eq!(outbox(&pool).await.len(), 1);
 }
 

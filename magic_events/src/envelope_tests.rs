@@ -108,6 +108,19 @@ fn a_value_that_is_no_variant_with_fields_is_refused() {
         Err(Error::Invalid(why)) => assert!(why.contains("does not serialize"), "{why}"),
         other => panic!("{other:?}"),
     }
+    // A newtype variant around something that is not a struct.
+    #[derive(Serialize)]
+    enum Wraps {
+        Number(u32),
+    }
+    match super::body(&Wraps::Number(5), true) {
+        Err(Error::Invalid(why)) => assert!(why.contains("not a JSON object: 5"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    match super::body(&"text", false) {
+        Err(Error::Invalid(why)) => assert!(why.contains("not a JSON object"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// A row of the outbox as `emit` writes it for `event`, with a fixed id and

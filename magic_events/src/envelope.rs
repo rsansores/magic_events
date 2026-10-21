@@ -48,6 +48,13 @@ pub(crate) fn body<E: Serialize + ?Sized>(event: &E, variant: bool) -> Result<Ve
         serde_json::to_writer(&mut out, event).map_err(|e| Refused(e.to_string()))
     };
     match written {
+        // A body is an object, as the derive's docs promise a consumer: a
+        // newtype variant around a number, or a `Serialize` written by hand,
+        // can make it anything else.
+        Ok(()) if out.first() != Some(&b'{') => Err(Error::Invalid(format!(
+            "the event's body is not a JSON object: {}",
+            String::from_utf8_lossy(&out[..out.len().min(64)])
+        ))),
         Ok(()) => Ok(out),
         Err(Refused(why)) => Err(Error::Invalid(format!(
             "the event does not serialize as JSON: {why}"

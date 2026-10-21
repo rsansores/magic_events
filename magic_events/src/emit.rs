@@ -1,7 +1,7 @@
 //! `emit`: an event, written to the outbox in the caller's transaction.
 
 use crate::envelope::{self, header_value};
-use crate::settings::{is_token, LONGEST_HEADER, MAX_BODY};
+use crate::settings::{is_token, LONGEST_HEADER, LONGEST_SUBJECT, LONGEST_TYPE, MAX_BODY};
 use crate::{Error, Event};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -33,30 +33,38 @@ use uuid::Uuid;
 /// `.`, a `*`, a `>`, whitespace or anything but printable ASCII; a body
 /// larger than the relay's `max_body`
 /// ([`Settings::max_body`](crate::Settings::max_body), 64 KiB unless a relay
-/// started with another); a subject token or a `ce-subject` over 1 KiB; a
-/// value that does not serialize. [`Error::Database`] when the database
+/// started with another), or that is not a JSON object; a subject over
+/// 1 KiB, or a `ce-subject` over 1 KiB once percent-encoded; a value that
+/// does not serialize. [`Error::Database`] when the database
 /// fails — the schema not installed, say, or a role that may not write it.
 pub async fn emit<E: Event>(conn: &mut PgConnection, event: &E) -> Result<Uuid, Error> {
     let described = event.__describe();
-    for token in &described.subject {
-        if !is_token(token) || token.len() > LONGEST_HEADER {
-            return Err(Error::Invalid(format!(
-                "`{}` is no subject: its token {token:?} is empty, longer than 1 KiB, or holds a \
-                 `.`, a `*`, a `>`, whitespace or anything but printable ASCII",
-                described.subject.join(".")
-            )));
-        }
+    let subject = described.subject.join(".");
+    if let Some(token) = described.subject.iter().find(|t| !is_token(t)) {
+        return Err(Error::Invalid(format!(
+            "`{subject}` is no subject: its token {token:?} is empty, or holds a `.`, a `*`, a \
+             `>`, whitespace or anything but printable ASCII"
+        )));
     }
-    let ce_subject = match &described.ce_subject {
-        Some(s) if s.len() > LONGEST_HEADER => {
-            return Err(Error::Invalid(format!(
-                "a `ce-subject` of {} bytes: it is 1 KiB at most",
-                s.len()
-            )))
-        }
-        Some(s) => Some(header_value(s)),
-        None => None,
-    };
+    if subject.len() > LONGEST_SUBJECT {
+        return Err(Error::Invalid(format!(
+            "a subject of {} bytes: it is 1 KiB at most",
+            subject.len()
+        )));
+    }
+    if described.r#type.len() > LONGEST_TYPE {
+        return Err(Error::Invalid(format!(
+            "a type of {} bytes: it is 255 at most",
+            described.r#type.len()
+        )));
+    }
+    let ce_subject = described.ce_subject.as_deref().map(header_value);
+    if let Some(s) = ce_subject.as_ref().filter(|s| s.len() > LONGEST_HEADER) {
+        return Err(Error::Invalid(format!(
+            "a `ce-subject` of {} bytes as a header: it is 1 KiB at most",
+            s.len()
+        )));
+    }
     let body = envelope::body(event, described.variant.is_some())?;
     let ty = format!("{}.v{}", described.r#type, described.version);
     let mut headers = serde_json::Map::new();
@@ -78,7 +86,7 @@ pub async fn emit<E: Event>(conn: &mut PgConnection, event: &E) -> Result<Uuid, 
          SELECT max_body, EXISTS (SELECT 1 FROM written) FROM bound",
     )
     .bind(id)
-    .bind(described.subject.join("."))
+    .bind(&subject)
     .bind(&ty)
     .bind(sqlx::types::Json(&headers))
     .bind(&body)

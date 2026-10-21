@@ -6,13 +6,26 @@ use std::time::Duration;
 /// The largest body [`emit`](crate::emit) takes by default: 64 KiB.
 pub(crate) const MAX_BODY: u32 = 64 << 10;
 
-/// Room a message keeps beside its body for its subject and headers: the
-/// broker's `max_payload` counts both.
+/// Room a message keeps beside its body for its headers: the broker's
+/// `max_payload` counts both. The longest headers the limits below allow —
+/// a `ce-source` and a `ce-subject` of [`LONGEST_HEADER`] each, a `ce-type`
+/// of [`LONGEST_TYPE`] and its version, two ids and a time — stay within it.
 pub(crate) const HEADROOM: u32 = 4 << 10;
 
-/// The longest subject token, `ce-subject` or event type `emit` takes, in
-/// bytes: together they stay within [`HEADROOM`].
+/// The longest `ce-subject` and `ce-source`, percent-encoded, in bytes.
 pub(crate) const LONGEST_HEADER: usize = 1 << 10;
+
+/// The longest subject an event renders, after the prefix, in bytes; with
+/// the prefix, a subject stays far within the 4 KiB a NATS client's control
+/// line holds.
+pub(crate) const LONGEST_SUBJECT: usize = 1 << 10;
+
+/// The longest subject prefix, in bytes.
+pub(crate) const LONGEST_PREFIX: usize = 255;
+
+/// The longest event type, in bytes, without its version: the derive holds
+/// a type to it.
+pub(crate) const LONGEST_TYPE: usize = 255;
 
 /// Where the stream keeps its messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,7 +224,13 @@ impl Settings {
         if self.source.is_empty() {
             return misuse("an empty source: CloudEvents requires one".to_owned());
         }
-        if self.subject_prefix.len() > LONGEST_HEADER
+        let source = crate::envelope::header_value(&self.source).len();
+        if source > LONGEST_HEADER {
+            return misuse(format!(
+                "a source of {source} bytes as a header: it is 1 KiB at most"
+            ));
+        }
+        if self.subject_prefix.len() > LONGEST_PREFIX
             || self.subject_prefix.split('.').any(|t| !is_token(t))
         {
             return misuse(format!(
@@ -300,6 +319,8 @@ mod tests {
             (Settings::new("SHOP EVENTS", "shop"), "stream name"),
             (Settings::new("", "shop"), "stream name"),
             (Settings::new("SHOP", ""), "source"),
+            (Settings::new("SHOP", "x".repeat(1025)), "source"),
+            (base().subject_prefix("x".repeat(256)), "prefix"),
             (base().subject_prefix("shop.*"), "prefix"),
             (base().subject_prefix("shop..x"), "prefix"),
             (base().subject_prefix(""), "prefix"),
