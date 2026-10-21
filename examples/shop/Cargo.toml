@@ -1,0 +1,18 @@
+[package]
+name = "shop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# A workspace of its own, with a lockfile of its own.
+[workspace]
+
+[dependencies]
+# Outside this repository, leave `path` out.
+magic_events = { version = "0.1.0", path = "../../magic_events", features = ["consume"] }
+async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "server_2_10"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

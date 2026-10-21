@@ -12,6 +12,11 @@ authors.workspace = true
 readme = "../README.md"
 documentation = "https://docs.rs/magic_events"
 
+[features]
+# `consume`: a Rust consumer of the stream, for a system that reads the
+# events and for a host's tests.
+consume = []
+
 [dependencies]
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "server_2_10"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
@@ -26,6 +31,9 @@ time = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v7"] }
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dev-dependencies]
 # `#[sqlx::test]`, which builds a database of its own for each test.

@@ -15,7 +15,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Formatting, clippy and the docs.
+  # Formatting, clippy and the docs, of the crates — with `consume` and
+  # without — and of the shop example.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -27,22 +28,37 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            .
+            examples/shop
       - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path examples/shop/Cargo.toml --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo doc --locked --no-deps --workspace
+      - run: cargo clippy --locked --manifest-path examples/shop/Cargo.toml --all-targets -- -D warnings
+      - run: cargo doc --locked --no-deps --workspace --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # What the crates depend on: advisories, licenses, sources, and nothing
-  # declared that nothing uses.
+  # What the crates depend on, and what the example does (it has a lockfile
+  # of its own): advisories, licenses, sources, and nothing declared that
+  # nothing uses.
   dependencies:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest:
+          - Cargo.toml
+          - examples/shop/Cargo.toml
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
+          manifest-path: ${{ matrix.manifest }}
           command: check
           arguments: --locked
   unused:
@@ -54,7 +70,7 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-machete
-      - run: cargo machete .
+      - run: cargo machete . examples/shop
 
   # The workflows themselves: an action not pinned to a commit, a token
   # that outlives its step, an expression a pull request can inject into a
@@ -120,7 +136,7 @@ jobs:
         with:
           # The matrix is not part of the job it keys by.
           key: postgres-${{ matrix.postgres }}
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --all-features
 
   # The derive's refusals, with the compiler's own words: held to the one
   # rustc the messages checked in were written with (`magic_events/tests/derive.rs`
@@ -152,7 +168,22 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo check --locked --workspace
+      - run: cargo check --locked --workspace --all-features
+
+  # The shop: its programs build against the crate as it is.
+  example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: examples/shop
+      - run: cargo build --locked --manifest-path examples/shop/Cargo.toml
 
   dashboard:
     runs-on: ubuntu-latest

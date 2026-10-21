@@ -1,0 +1,15 @@
+# What the shop needs: a PostgreSQL, and a NATS server with JetStream.
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    ports:
+      - "5434:5432"
+  nats:
+    image: nats:2.15.1
+    command: ["-js"]
+    ports:
+      - "4223:4222"

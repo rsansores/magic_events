@@ -8,9 +8,12 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+  # The dependencies themselves: the workspace, and the example with a
+  # lockfile of its own.
   - package-ecosystem: cargo
     directories:
       - /
+      - /examples/shop
     schedule:
       interval: weekly
     cooldown:

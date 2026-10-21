@@ -21,6 +21,8 @@
 
 #![warn(missing_docs, clippy::missing_errors_doc)]
 
+#[cfg(feature = "consume")]
+pub mod consume;
 mod emit;
 mod envelope;
 mod error;
@@ -47,6 +49,9 @@ pub const SCHEMA_VERSION: i32 = 1;
 pub trait Event: serde::Serialize + __private::Sealed {
     #[doc(hidden)]
     const __TYPES: &'static [(&'static str, u32)];
+
+    #[doc(hidden)]
+    const __ENUM: bool;
 
     #[doc(hidden)]
     fn __describe(&self) -> __private::Described;

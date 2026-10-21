@@ -511,12 +511,16 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
             ))
         }
     };
+    let is_enum = matches!(input.data, Data::Enum(_));
     Ok(quote! {
         impl #impl_generics #krate::__private::Sealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics #krate::Event for #name #ty_generics #where_clause {
             #[doc(hidden)]
             const __TYPES: &'static [(&'static str, u32)] = #types;
+
+            #[doc(hidden)]
+            const __ENUM: bool = #is_enum;
 
             #[doc(hidden)]
             fn __describe(&self) -> #krate::__private::Described {
