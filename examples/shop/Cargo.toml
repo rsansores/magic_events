@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 # Outside this repository, leave `path` out.
-magic_events = { version = "0.1.1", path = "../../magic_events", features = ["consume"] }
+magic_events = { version = "0.1.3", path = "../../magic_events", features = ["consume"] }
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "server_2_10"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 — unreleased
+## 0.1.3 — 2026-10-21
 
 Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.
 The crates are unchanged but for their version.
