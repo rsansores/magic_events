@@ -24,7 +24,7 @@ futures-util = { version = "0.3", default-features = false }
 magic_events_derive = { version = "=0.1.0", path = "../magic_events_derive" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "derive", "uuid", "chrono", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "derive", "uuid", "chrono", "json"] }
 thiserror = "2"
 # The broker's times, unless something enables async-nats' `chrono`.
 time = { version = "0.3", default-features = false }
@@ -37,7 +37,7 @@ all-features = true
 
 [dev-dependencies]
 # `#[sqlx::test]`, which builds a database of its own for each test.
-sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate"] }
+sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 trybuild = "1"
 ts-rs = { version = "12", features = ["chrono-impl", "uuid-impl", "serde-compat", "no-serde-warnings"] }
