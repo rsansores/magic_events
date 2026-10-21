@@ -1,7 +1,7 @@
 {
   "name": "magic_events_dashboard",
   "version": "0.1.0",
-  "description": "The magic_events dashboard for Vue 3: are events leaving PostgreSQL, what waits and why, and which consumer is behind \u2014 headless, or ready-made.",
+  "description": "The magic_events dashboard for Vue 3: are events leaving PostgreSQL, what waits and why, and which consumer is behind — headless, or ready-made.",
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/rsansores/magic_events/tree/main/dashboard",
