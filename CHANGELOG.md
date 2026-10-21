@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 — unreleased
+## 0.1.1 — 2026-10-21
 
 Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.
 

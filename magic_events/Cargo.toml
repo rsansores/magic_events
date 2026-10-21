@@ -21,7 +21,7 @@ consume = []
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "server_2_10"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 futures-util = { version = "0.3", default-features = false }
-magic_events_derive = { version = "=0.1.0", path = "../magic_events_derive" }
+magic_events_derive = { version = "=0.1.1", path = "../magic_events_derive" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "derive", "uuid", "chrono", "json"] }
