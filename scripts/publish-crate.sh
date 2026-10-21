@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Publishes one crate of the workspace at the version of the release, unless
+# crates.io already has that version — so a release that failed half-way is
+# finished by running its jobs again. The release's `prepare` job packed and
+# verified the tarball of this very tree, the version set in it and not
+# committed yet; publishing packs it again and compiles nothing, so the token
+# never reaches a build script or a proc macro.
+#
+#   scripts/publish-crate.sh <crate> <version>
+#
+# CARGO_REGISTRY_TOKEN: a token for crates.io.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+crate=${1:?the crate to publish}
+version=${2:?the version to publish}
+
+status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --user-agent "magic_events release (https://github.com/rsansores/magic_events)" \
+  "https://crates.io/api/v1/crates/$crate/$version")
+case "$status" in
+  200) echo "$crate $version is on crates.io already"; exit 0 ;;
+  404) ;;
+  *) echo "crates.io answered $status for $crate $version" >&2; exit 1 ;;
+esac
+
+cargo publish --locked --no-verify --allow-dirty -p "$crate"

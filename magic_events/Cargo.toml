@@ -41,3 +41,8 @@ sqlx = { version = "0.8", default-features = false, features = ["macros", "migra
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 trybuild = "1"
 ts-rs = { version = "12", features = ["chrono-impl", "uuid-impl", "serde-compat", "no-serde-warnings"] }
+
+# The README's code needs every feature it shows.
+[[test]]
+name = "readme"
+required-features = ["consume"]

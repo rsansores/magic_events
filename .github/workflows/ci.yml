@@ -158,6 +158,26 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --locked -p magic_events --test derive
 
+  # What a host can name is what magic_events/public-api/ lists: a change to
+  # it is made there too, on purpose, and reviewed as one. The listing is
+  # read off rustdoc's JSON, so the nightly is pinned.
+  public-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-10-10
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: cargo-public-api@0.52.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: |
+          cargo +nightly-2026-10-10 public-api -p magic_events --all-features -s > "$RUNNER_TEMP/all-features.txt"
+          diff -u magic_events/public-api/all-features.txt "$RUNNER_TEMP/all-features.txt"
+
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -214,3 +234,31 @@ jobs:
       - run: pnpm test
       # Builds, packs, and lints the tarball as npm and TypeScript read it.
       - run: pnpm check:pack
+
+  # Every link the documents and the rustdoc comments make into the
+  # repository, anchors included, against the tree.
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: lychee@0.24.2
+      - run: scripts/check-links.sh
+
+  # What a release publishes, packed and built from the tarballs as
+  # crates.io will; and one version everywhere.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: scripts/check-versions.sh
+      - run: cargo package --locked --workspace

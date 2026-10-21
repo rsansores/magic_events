@@ -3,9 +3,46 @@
 //!
 //! An event is a type that derives [`Event`](macro@Event). [`emit`] writes
 //! one to an outbox table in the writing transaction, as one more statement;
-//! a relay inside the host process, one at a time across every process that
-//! runs it, publishes what committed to NATS JetStream as CloudEvents, and
-//! deletes it once the stream acknowledged it.
+//! a relay inside the host process ([`Events`]), one at a time across every
+//! process that runs it, publishes what committed to NATS JetStream as
+//! CloudEvents, and deletes it once the stream acknowledged it.
+//!
+//! ```no_run
+//! use magic_events::{emit, Event, Events, Settings};
+//!
+//! #[derive(serde::Serialize, Event)]
+//! #[event(type = "order.shipped", version = 1, subject = "orders.{store}.shipped")]
+//! pub struct OrderShipped {
+//!     pub store: u32,
+//!     pub ids: Vec<i64>,
+//! }
+//!
+//! # async fn main_(pool: sqlx::PgPool, nats: async_nats::Client) -> Result<(), magic_events::Error> {
+//! // Once, in main.
+//! Events::install(&pool).await?;
+//! let jetstream = async_nats::jetstream::new(nats);
+//! let events = Events::start(pool.clone(), jetstream, Settings::new("SHOP_EVENTS", "shop")).await?;
+//!
+//! // Wherever you write.
+//! let mut tx = pool.begin().await?;
+//! // … the writes the event is about …
+//! emit(&mut tx, &OrderShipped { store: 7, ids: vec![41, 42] }).await?;
+//! tx.commit().await?;
+//!
+//! events.stop().await;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [The README](https://github.com/rsansores/magic_events#readme) says what
+//! is guaranteed, exactly, and how to consume, monitor and set it up;
+//! [how it works](https://github.com/rsansores/magic_events/blob/main/HOW_IT_WORKS.md)
+//! goes through the relay and every failure.
+//!
+//! # Features
+//!
+//! - `consume`: [`consume::consume`], a Rust consumer of the stream that
+//!   decodes each event into its type.
 //!
 //! # Public dependencies
 //!
@@ -141,3 +178,6 @@ mod tests;
 
 #[cfg(test)]
 mod walk_tests;
+
+#[cfg(test)]
+mod bench_tests;

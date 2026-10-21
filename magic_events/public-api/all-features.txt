@@ -1,0 +1,328 @@
+pub mod magic_events
+pub use magic_events::Event
+pub mod magic_events::consume
+#[non_exhaustive] pub struct magic_events::consume::Delivery<E>
+pub magic_events::consume::Delivery::event: E
+pub magic_events::consume::Delivery::id: alloc::string::String
+pub magic_events::consume::Delivery::redelivered: u64
+pub magic_events::consume::Delivery::subject: alloc::string::String
+pub magic_events::consume::Delivery::time: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+impl<E: core::clone::Clone> core::clone::Clone for magic_events::consume::Delivery<E>
+pub fn magic_events::consume::Delivery<E>::clone(&self) -> Self
+impl<E: core::fmt::Debug> core::fmt::Debug for magic_events::consume::Delivery<E>
+pub fn magic_events::consume::Delivery<E>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<E> core::marker::Freeze for magic_events::consume::Delivery<E> where E: core::marker::Freeze
+impl<E> core::marker::Send for magic_events::consume::Delivery<E> where E: core::marker::Send
+impl<E> core::marker::Sync for magic_events::consume::Delivery<E> where E: core::marker::Sync
+impl<E> core::marker::Unpin for magic_events::consume::Delivery<E> where E: core::marker::Unpin
+impl<E> core::marker::UnsafeUnpin for magic_events::consume::Delivery<E> where E: core::marker::UnsafeUnpin
+impl<E> core::panic::unwind_safe::RefUnwindSafe for magic_events::consume::Delivery<E> where E: core::panic::unwind_safe::RefUnwindSafe
+impl<E> core::panic::unwind_safe::UnwindSafe for magic_events::consume::Delivery<E> where E: core::panic::unwind_safe::UnwindSafe
+pub async fn magic_events::consume::consume<E, H, F>(&async_nats::jetstream::context::Context, &str, &str, &str, H) -> core::result::Result<(), magic_events::Error> where E: magic_events::Event + serde_core::de::DeserializeOwned, H: core::ops::function::FnMut(magic_events::consume::Delivery<E>) -> F, F: core::future::future::Future<Output = magic_events::consume::Handled>
+pub type magic_events::consume::Handled = core::result::Result<(), alloc::boxed::Box<(dyn core::error::Error + core::marker::Send + core::marker::Sync)>>
+pub mod magic_events::status
+#[non_exhaustive] pub struct magic_events::status::Consumer
+pub magic_events::status::Consumer::ack_pending: u64
+pub magic_events::status::Consumer::filters: alloc::vec::Vec<alloc::string::String>
+pub magic_events::status::Consumer::last_active: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Consumer::name: alloc::string::String
+pub magic_events::status::Consumer::pending: u64
+pub magic_events::status::Consumer::redelivered: u64
+impl core::clone::Clone for magic_events::status::Consumer
+pub fn magic_events::status::Consumer::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Consumer
+pub fn magic_events::status::Consumer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Consumer
+pub fn magic_events::status::Consumer::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Consumer
+impl core::marker::Send for magic_events::status::Consumer
+impl core::marker::Sync for magic_events::status::Consumer
+impl core::marker::Unpin for magic_events::status::Consumer
+impl core::marker::UnsafeUnpin for magic_events::status::Consumer
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Consumer
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Consumer
+pub struct magic_events::status::Filter
+impl magic_events::status::Filter
+pub fn magic_events::status::Filter::all() -> Self
+pub fn magic_events::status::Filter::subject(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for magic_events::status::Filter
+pub fn magic_events::status::Filter::clone(&self) -> Self
+impl core::cmp::Eq for magic_events::status::Filter
+impl core::cmp::PartialEq for magic_events::status::Filter
+pub fn magic_events::status::Filter::eq(&self, &Self) -> bool
+impl core::fmt::Debug for magic_events::status::Filter
+pub fn magic_events::status::Filter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for magic_events::status::Filter
+impl core::marker::Freeze for magic_events::status::Filter
+impl core::marker::Send for magic_events::status::Filter
+impl core::marker::Sync for magic_events::status::Filter
+impl core::marker::Unpin for magic_events::status::Filter
+impl core::marker::UnsafeUnpin for magic_events::status::Filter
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Filter
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Filter
+#[non_exhaustive] pub struct magic_events::status::Message
+pub magic_events::status::Message::body: alloc::string::String
+pub magic_events::status::Message::headers: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub magic_events::status::Message::sequence: u64
+pub magic_events::status::Message::subject: alloc::string::String
+pub magic_events::status::Message::time: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+impl core::clone::Clone for magic_events::status::Message
+pub fn magic_events::status::Message::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Message
+pub fn magic_events::status::Message::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Message
+pub fn magic_events::status::Message::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Message
+impl core::marker::Send for magic_events::status::Message
+impl core::marker::Sync for magic_events::status::Message
+impl core::marker::Unpin for magic_events::status::Message
+impl core::marker::UnsafeUnpin for magic_events::status::Message
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Message
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Message
+#[non_exhaustive] pub struct magic_events::status::Outbox
+pub magic_events::status::Outbox::first_parked: alloc::vec::Vec<magic_events::status::Parked>
+pub magic_events::status::Outbox::oldest_pending_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Outbox::parked: u64
+pub magic_events::status::Outbox::pending: u64
+impl core::clone::Clone for magic_events::status::Outbox
+pub fn magic_events::status::Outbox::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Outbox
+pub fn magic_events::status::Outbox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Outbox
+pub fn magic_events::status::Outbox::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Outbox
+impl core::marker::Send for magic_events::status::Outbox
+impl core::marker::Sync for magic_events::status::Outbox
+impl core::marker::Unpin for magic_events::status::Outbox
+impl core::marker::UnsafeUnpin for magic_events::status::Outbox
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Outbox
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Outbox
+#[non_exhaustive] pub struct magic_events::status::Parked
+pub magic_events::status::Parked::attempts: i32
+pub magic_events::status::Parked::emitted_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Parked::event_id: uuid::Uuid
+pub magic_events::status::Parked::id: i64
+pub magic_events::status::Parked::last_error: core::option::Option<alloc::string::String>
+pub magic_events::status::Parked::parked_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Parked::subject: alloc::string::String
+pub magic_events::status::Parked::ty: alloc::string::String
+impl core::clone::Clone for magic_events::status::Parked
+pub fn magic_events::status::Parked::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Parked
+pub fn magic_events::status::Parked::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Parked
+pub fn magic_events::status::Parked::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Parked
+impl core::marker::Send for magic_events::status::Parked
+impl core::marker::Sync for magic_events::status::Parked
+impl core::marker::Unpin for magic_events::status::Parked
+impl core::marker::UnsafeUnpin for magic_events::status::Parked
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Parked
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Parked
+#[non_exhaustive] pub struct magic_events::status::Published
+pub magic_events::status::Published::count: u64
+pub magic_events::status::Published::day: chrono::naive::date::NaiveDate
+pub magic_events::status::Published::ty: alloc::string::String
+impl core::clone::Clone for magic_events::status::Published
+pub fn magic_events::status::Published::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Published
+pub fn magic_events::status::Published::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Published
+pub fn magic_events::status::Published::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Published
+impl core::marker::Send for magic_events::status::Published
+impl core::marker::Sync for magic_events::status::Published
+impl core::marker::Unpin for magic_events::status::Published
+impl core::marker::UnsafeUnpin for magic_events::status::Published
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Published
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Published
+#[non_exhaustive] pub struct magic_events::status::Recent
+pub magic_events::status::Recent::contract: u32
+pub magic_events::status::Recent::filter: alloc::string::String
+pub magic_events::status::Recent::messages: alloc::vec::Vec<magic_events::status::Message>
+impl core::clone::Clone for magic_events::status::Recent
+pub fn magic_events::status::Recent::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Recent
+pub fn magic_events::status::Recent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Recent
+pub fn magic_events::status::Recent::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Recent
+impl core::marker::Send for magic_events::status::Recent
+impl core::marker::Sync for magic_events::status::Recent
+impl core::marker::Unpin for magic_events::status::Recent
+impl core::marker::UnsafeUnpin for magic_events::status::Recent
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Recent
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Recent
+#[non_exhaustive] pub struct magic_events::status::Relay
+pub magic_events::status::Relay::failures: i32
+pub magic_events::status::Relay::last_error: core::option::Option<alloc::string::String>
+pub magic_events::status::Relay::last_published_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Relay::retry_after: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Relay::running: bool
+impl core::clone::Clone for magic_events::status::Relay
+pub fn magic_events::status::Relay::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Relay
+pub fn magic_events::status::Relay::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Relay
+pub fn magic_events::status::Relay::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Relay
+impl core::marker::Send for magic_events::status::Relay
+impl core::marker::Sync for magic_events::status::Relay
+impl core::marker::Unpin for magic_events::status::Relay
+impl core::marker::UnsafeUnpin for magic_events::status::Relay
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Relay
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Relay
+#[non_exhaustive] pub struct magic_events::status::Status
+pub magic_events::status::Status::at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Status::broker_error: core::option::Option<alloc::string::String>
+pub magic_events::status::Status::consumers: core::option::Option<alloc::vec::Vec<magic_events::status::Consumer>>
+pub magic_events::status::Status::contract: u32
+pub magic_events::status::Status::filter: alloc::string::String
+pub magic_events::status::Status::outbox: magic_events::status::Outbox
+pub magic_events::status::Status::published: core::option::Option<alloc::vec::Vec<magic_events::status::Published>>
+pub magic_events::status::Status::relay: magic_events::status::Relay
+pub magic_events::status::Status::stream: core::option::Option<magic_events::status::Stream>
+impl core::clone::Clone for magic_events::status::Status
+pub fn magic_events::status::Status::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Status
+pub fn magic_events::status::Status::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Status
+pub fn magic_events::status::Status::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Status
+impl core::marker::Send for magic_events::status::Status
+impl core::marker::Sync for magic_events::status::Status
+impl core::marker::Unpin for magic_events::status::Status
+impl core::marker::UnsafeUnpin for magic_events::status::Status
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Status
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Status
+#[non_exhaustive] pub struct magic_events::status::Stream
+pub magic_events::status::Stream::bytes: core::option::Option<u64>
+pub magic_events::status::Stream::first_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Stream::last_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Stream::messages: u64
+pub magic_events::status::Stream::name: alloc::string::String
+pub magic_events::status::Stream::subjects: alloc::vec::Vec<magic_events::status::SubjectCount>
+pub magic_events::status::Stream::subjects_total: u64
+impl core::clone::Clone for magic_events::status::Stream
+pub fn magic_events::status::Stream::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::Stream
+pub fn magic_events::status::Stream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::Stream
+pub fn magic_events::status::Stream::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::Stream
+impl core::marker::Send for magic_events::status::Stream
+impl core::marker::Sync for magic_events::status::Stream
+impl core::marker::Unpin for magic_events::status::Stream
+impl core::marker::UnsafeUnpin for magic_events::status::Stream
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Stream
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Stream
+#[non_exhaustive] pub struct magic_events::status::SubjectCount
+pub magic_events::status::SubjectCount::messages: u64
+pub magic_events::status::SubjectCount::subject: alloc::string::String
+impl core::clone::Clone for magic_events::status::SubjectCount
+pub fn magic_events::status::SubjectCount::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::status::SubjectCount
+pub fn magic_events::status::SubjectCount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for magic_events::status::SubjectCount
+pub fn magic_events::status::SubjectCount::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for magic_events::status::SubjectCount
+impl core::marker::Send for magic_events::status::SubjectCount
+impl core::marker::Sync for magic_events::status::SubjectCount
+impl core::marker::Unpin for magic_events::status::SubjectCount
+impl core::marker::UnsafeUnpin for magic_events::status::SubjectCount
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::SubjectCount
+impl core::panic::unwind_safe::UnwindSafe for magic_events::status::SubjectCount
+pub const magic_events::status::CONTRACT: u32
+#[non_exhaustive] pub enum magic_events::Error
+pub magic_events::Error::Broker
+pub magic_events::Error::Broker::reason: alloc::string::String
+pub magic_events::Error::Broker::transient: bool
+pub magic_events::Error::Database(sqlx_core::error::Error)
+pub magic_events::Error::Invalid(alloc::string::String)
+pub magic_events::Error::Misuse(alloc::string::String)
+impl magic_events::Error
+pub fn magic_events::Error::is_transient(&self) -> bool
+impl core::convert::From<sqlx_core::error::Error> for magic_events::Error
+pub fn magic_events::Error::from(sqlx_core::error::Error) -> Self
+impl core::error::Error for magic_events::Error
+pub fn magic_events::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for magic_events::Error
+pub fn magic_events::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for magic_events::Error
+pub fn magic_events::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for magic_events::Error
+impl core::marker::Send for magic_events::Error
+impl core::marker::Sync for magic_events::Error
+impl core::marker::Unpin for magic_events::Error
+impl core::marker::UnsafeUnpin for magic_events::Error
+impl !core::panic::unwind_safe::RefUnwindSafe for magic_events::Error
+impl !core::panic::unwind_safe::UnwindSafe for magic_events::Error
+#[non_exhaustive] pub enum magic_events::Storage
+pub magic_events::Storage::File
+pub magic_events::Storage::Memory
+impl core::clone::Clone for magic_events::Storage
+pub fn magic_events::Storage::clone(&self) -> Self
+impl core::cmp::Eq for magic_events::Storage
+impl core::cmp::PartialEq for magic_events::Storage
+pub fn magic_events::Storage::eq(&self, &Self) -> bool
+impl core::fmt::Debug for magic_events::Storage
+pub fn magic_events::Storage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for magic_events::Storage
+impl core::marker::StructuralPartialEq for magic_events::Storage
+impl core::marker::Freeze for magic_events::Storage
+impl core::marker::Send for magic_events::Storage
+impl core::marker::Sync for magic_events::Storage
+impl core::marker::Unpin for magic_events::Storage
+impl core::marker::UnsafeUnpin for magic_events::Storage
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::Storage
+impl core::panic::unwind_safe::UnwindSafe for magic_events::Storage
+pub struct magic_events::Events
+impl magic_events::Events
+pub async fn magic_events::Events::install(&sqlx_postgres::PgPool) -> core::result::Result<(), magic_events::Error>
+pub async fn magic_events::Events::pass_now(&self) -> core::result::Result<core::option::Option<usize>, magic_events::Error>
+pub async fn magic_events::Events::recent(&self, &magic_events::status::Filter, u32) -> core::result::Result<magic_events::status::Recent, magic_events::Error>
+pub async fn magic_events::Events::start(sqlx_postgres::PgPool, async_nats::jetstream::context::Context, magic_events::Settings) -> core::result::Result<Self, magic_events::Error>
+pub async fn magic_events::Events::status(&self, &magic_events::status::Filter) -> core::result::Result<magic_events::status::Status, magic_events::Error>
+pub async fn magic_events::Events::stop(self)
+pub async fn magic_events::Events::unpark(&self, i64) -> core::result::Result<bool, magic_events::Error>
+pub async fn magic_events::Events::unpark_all(&self) -> core::result::Result<u64, magic_events::Error>
+impl core::fmt::Debug for magic_events::Events
+pub fn magic_events::Events::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for magic_events::Events
+impl core::marker::Send for magic_events::Events
+impl core::marker::Sync for magic_events::Events
+impl core::marker::Unpin for magic_events::Events
+impl core::marker::UnsafeUnpin for magic_events::Events
+impl !core::panic::unwind_safe::RefUnwindSafe for magic_events::Events
+impl !core::panic::unwind_safe::UnwindSafe for magic_events::Events
+pub struct magic_events::Settings
+impl magic_events::Settings
+pub fn magic_events::Settings::backoff(self, core::time::Duration, core::time::Duration) -> Self
+pub fn magic_events::Settings::batch(self, u32) -> Self
+pub fn magic_events::Settings::duplicate_window(self, core::time::Duration) -> Self
+pub fn magic_events::Settings::idle(self, core::time::Duration) -> Self
+pub fn magic_events::Settings::in_flight(self, u32) -> Self
+pub fn magic_events::Settings::manage_stream(self, bool) -> Self
+pub fn magic_events::Settings::max_body(self, u32) -> Self
+pub fn magic_events::Settings::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn magic_events::Settings::replicas(self, usize) -> Self
+pub fn magic_events::Settings::retention(self, core::time::Duration) -> Self
+pub fn magic_events::Settings::send_timeout(self, core::time::Duration) -> Self
+pub fn magic_events::Settings::standby(self, core::time::Duration) -> Self
+pub fn magic_events::Settings::storage(self, magic_events::Storage) -> Self
+pub fn magic_events::Settings::subject_prefix(self, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for magic_events::Settings
+pub fn magic_events::Settings::clone(&self) -> Self
+impl core::fmt::Debug for magic_events::Settings
+pub fn magic_events::Settings::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for magic_events::Settings
+impl core::marker::Send for magic_events::Settings
+impl core::marker::Sync for magic_events::Settings
+impl core::marker::Unpin for magic_events::Settings
+impl core::marker::UnsafeUnpin for magic_events::Settings
+impl core::panic::unwind_safe::RefUnwindSafe for magic_events::Settings
+impl core::panic::unwind_safe::UnwindSafe for magic_events::Settings
+pub const magic_events::SCHEMA_VERSION: i32
+pub trait magic_events::Event: serde_core::ser::Serialize + __private::Sealed
+pub async fn magic_events::emit<E: magic_events::Event>(&mut sqlx_postgres::connection::PgConnection, &E) -> core::result::Result<uuid::Uuid, magic_events::Error>
+pub fn magic_events::migration(i32) -> core::option::Option<alloc::string::String>
