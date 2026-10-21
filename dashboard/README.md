@@ -24,8 +24,14 @@ CommonJS `require` finds no entry point).
 import { EventsDashboard, type Recent, type Status } from 'magic_events_dashboard'
 import 'magic_events_dashboard/styles.css'
 
-const fetchStatus = async (): Promise<Status> => (await fetch('/admin/events/status')).json()
-const fetchRecent = async (): Promise<Recent> => (await fetch('/admin/events/recent')).json()
+// An error answer is an error: the dashboard says why it has nothing to show.
+async function get<T>(path: string): Promise<T> {
+  const answer = await fetch(path)
+  if (!answer.ok) throw new Error(`${answer.status} ${answer.statusText}`)
+  return (await answer.json()) as T
+}
+const fetchStatus = () => get<Status>('/admin/events/status')
+const fetchRecent = () => get<Recent>('/admin/events/recent')
 </script>
 
 <template>
@@ -76,9 +82,36 @@ it, which is also what keeps the contrast.
 
 ## The same, with your own components
 
-A host with a design system of its own calls `useEventsDashboard` in its own
-component and draws the same answers with its own parts, saying them with the
-sentence functions of the core:
+`<EventsDashboard>` takes your colours, font and spacing (its variables,
+above), but its markup and layout are its own. An app with a design system of
+its own — its own cards, tables, alerts — does not use the component: it calls
+`useEventsDashboard` in a component of its own, and draws every part with its
+own pieces. The package gives it the state and the words; nothing of its look
+comes along, and its stylesheet is not imported.
+
+```vue
+<script setup lang="ts">
+// Your component: your Alert, StatCard and DataTable, the dashboard's state.
+import { useEventsDashboard } from 'magic_events_dashboard'
+import { Alert, DataTable, StatCard } from '@/components/ui'
+import { fetchEventsStatus } from '@/api/events'
+
+const { banner, status, consumers, error, t } = useEventsDashboard(fetchEventsStatus)
+</script>
+
+<template>
+  <Alert v-if="error" tone="danger">{{ error }}</Alert>
+  <template v-else-if="banner && status">
+    <Alert :tone="banner.mood === 'ok' ? 'success' : 'danger'" :title="banner.title">
+      <p v-for="line in banner.lines" :key="line">{{ line }}</p>
+    </Alert>
+    <StatCard :label="t('outbox.pending')" :value="status.outbox.pending" />
+    <DataTable v-if="consumers" :rows="consumers" :columns="['name', 'pending', 'ackPending']" />
+  </template>
+</template>
+```
+
+What it hands you:
 
 ```ts
 import { describeReason, useEventsDashboard } from 'magic_events_dashboard'

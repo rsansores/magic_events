@@ -74,7 +74,8 @@ first_parked: Array<Parked>, };
  */
 export type Parked = { 
 /**
- * Its id in the outbox: what `Events::unpark` takes.
+ * Its id in the outbox: what `Events::unpark` takes. A sequence from 1,
+ * far below 2^53, so a JavaScript number holds it exactly.
  */
 id: number, 
 /**

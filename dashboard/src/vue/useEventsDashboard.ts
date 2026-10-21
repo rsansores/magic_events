@@ -8,18 +8,7 @@
 // behind its own authorization, and hands the dashboard the function that
 // does.
 
-import {
-  computed,
-  getCurrentInstance,
-  getCurrentScope,
-  onBeforeUnmount,
-  onMounted,
-  onScopeDispose,
-  ref,
-  shallowRef,
-  toValue,
-  type MaybeRefOrGetter,
-} from 'vue'
+import { computed, ref, shallowRef, toValue, type MaybeRefOrGetter } from 'vue'
 import type { Status } from '../core/contract/types.js'
 import { bannerOf, mismatchOf, type Speech } from '../core/describe.js'
 import { consumersOf, healthOf, publishedByDay, publishedByType } from '../core/derive.js'
@@ -27,6 +16,7 @@ import type { Messages } from '../core/i18n.js'
 import { timeOf } from '../core/time.js'
 import { useServerClock } from './clock.js'
 import { useDashboardI18n } from './i18n.js'
+import { whileAlive } from './lifecycle.js'
 
 export interface EventsDashboardOptions {
   /** How often to fetch the status again, in ms; 0 fetches it once.
@@ -55,9 +45,14 @@ export function useEventsDashboard(fetchStatus: () => Promise<Status>, options: 
   const failed = ref<string | null>(null)
   const loading = ref(false)
 
-  /** Fetches the status now, unless a fetch is under way. */
-  async function refresh() {
-    if (loading.value) return
+  let again = false
+  /** Fetches the status now; asked while a fetch is under way, fetches once
+   * more after it, so what the host just did shows. */
+  async function refresh(): Promise<void> {
+    if (loading.value) {
+      again = true
+      return
+    }
     loading.value = true
     try {
       status.value = await fetchStatus()
@@ -66,6 +61,10 @@ export function useEventsDashboard(fetchStatus: () => Promise<Status>, options: 
       failed.value = e instanceof Error ? e.message : String(e)
     } finally {
       loading.value = false
+    }
+    if (again) {
+      again = false
+      await refresh()
     }
   }
 
@@ -84,13 +83,7 @@ export function useEventsDashboard(fetchStatus: () => Promise<Status>, options: 
     stopped = true
     clearTimeout(timer)
   }
-  if (getCurrentInstance()) {
-    onMounted(start)
-    onBeforeUnmount(stop)
-  } else if (getCurrentScope() && typeof window !== 'undefined') {
-    start()
-    onScopeDispose(stop)
-  }
+  whileAlive(start, stop)
 
   const now = useServerClock(() => status.value)
 

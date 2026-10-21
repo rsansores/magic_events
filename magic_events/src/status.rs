@@ -168,7 +168,8 @@ pub struct Outbox {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct Parked {
-    /// Its id in the outbox: what `Events::unpark` takes.
+    /// Its id in the outbox: what `Events::unpark` takes. A sequence from 1,
+    /// far below 2^53, so a JavaScript number holds it exactly.
     pub id: i64,
     /// The event's id, its `ce-id`.
     pub event_id: Uuid,

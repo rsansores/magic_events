@@ -51,3 +51,21 @@ describe('useEventsDashboard', () => {
     scope.stop()
   })
 })
+
+describe('refresh', () => {
+  it('asked while a fetch is under way, fetches once more after it', async () => {
+    let calls = 0
+    const { dash, scope } = dashboard(async () => {
+      calls += 1
+      await new Promise((r) => setTimeout(r, 5))
+      return { ...status, outbox: { ...status.outbox, pending: calls } }
+    })
+    const first = dash.refresh()
+    void dash.refresh()
+    void dash.refresh()
+    await first
+    expect(calls).toBe(2)
+    expect(dash.status.value?.outbox.pending).toBe(2)
+    scope.stop()
+  })
+})

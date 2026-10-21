@@ -2,17 +2,9 @@
 // follow it without the browser's clock ever being compared with a time
 // the database wrote.
 
-import {
-  computed,
-  getCurrentInstance,
-  getCurrentScope,
-  onBeforeUnmount,
-  onMounted,
-  onScopeDispose,
-  ref,
-  watch,
-} from 'vue'
+import { computed, ref, watch } from 'vue'
 import { serverNow } from '../core/time.js'
+import { whileAlive } from './lifecycle.js'
 
 /** The database's time now, from the `at` of the answer `answered` returns.
  * It ticks only in a browser: on the server a page renders once, and no
@@ -33,13 +25,7 @@ export function useServerClock(answered: () => { at: string } | null | undefined
     clearInterval(timer)
     timer = undefined
   }
-  if (getCurrentInstance()) {
-    onMounted(start)
-    onBeforeUnmount(stop)
-  } else if (getCurrentScope() && typeof window !== 'undefined') {
-    start()
-    onScopeDispose(stop)
-  }
+  whileAlive(start, stop)
 
   return computed(() => {
     const answer = answered()

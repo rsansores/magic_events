@@ -83,7 +83,7 @@ const en: MessageTable = {
   'consumer.last_active': 'Last delivered',
   'consumer.never': 'Never',
   'published.title': 'Published',
-  'published.none': 'Nothing published in the last 30 days.',
+  'published.none': 'Nothing was published lately.',
   'published.day': 'Day',
   'published.type': 'Type',
   'published.count': 'Events',
