@@ -36,6 +36,9 @@ const PARKED_LISTED: i64 = 10;
 /// Subjects an answer counts messages of, at most: those with the most.
 const SUBJECTS_LISTED: usize = 100;
 
+/// Messages `recent` answers, at most.
+const RECENT_MOST: u32 = 1_000;
+
 /// Days of published counts an answer carries.
 const PUBLISHED_DAYS: i32 = 30;
 
@@ -352,14 +355,15 @@ async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Resul
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let pattern = pattern(filter);
+    // Every subject under the prefix is every row: no pattern to match.
+    let pattern = (!all).then(|| pattern(filter));
     let (at, pending, oldest, parked): (DateTime<Utc>, i64, Option<DateTime<Utc>>, i64) =
         sqlx::query_as(
             "SELECT now(), \
                     count(*) FILTER (WHERE parked_at IS NULL), \
                     min(emitted_at) FILTER (WHERE parked_at IS NULL), \
                     count(*) FILTER (WHERE parked_at IS NOT NULL) \
-               FROM magic_events.outbox WHERE ($1 || '.' || subject) ~ $2",
+               FROM magic_events.outbox WHERE $2::text IS NULL OR ($1 || '.' || subject) ~ $2",
         )
         .bind(prefix)
         .bind(&pattern)
@@ -369,7 +373,8 @@ async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Resul
         "SELECT id, event_id, $1 || '.' || subject AS subject, type, attempts, last_error, \
                 emitted_at, parked_at \
            FROM magic_events.outbox \
-          WHERE parked_at IS NOT NULL AND ($1 || '.' || subject) ~ $2 ORDER BY id LIMIT $3",
+          WHERE parked_at IS NOT NULL AND ($2::text IS NULL OR ($1 || '.' || subject) ~ $2) \
+          ORDER BY id LIMIT $3",
     )
     .bind(prefix)
     .bind(&pattern)
@@ -570,7 +575,7 @@ pub(crate) async fn recent(
         reason: format!("the stream `{}` could not be read: {e}", settings.stream),
         transient: true,
     };
-    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let limit = usize::try_from(limit.min(RECENT_MOST)).unwrap_or(usize::MAX);
     let mut answer = Recent {
         contract: CONTRACT,
         filter: subject.clone(),
@@ -605,7 +610,9 @@ pub(crate) async fn recent(
             .map_err(|e| broker(&e))?;
         let mut consumer = consumer;
         let pending = consumer.info().await.map_err(|e| broker(&e))?.num_pending;
-        let mut found = Vec::new();
+        // The last `limit` read so far: what is read before them is let go.
+        let mut found = std::collections::VecDeque::with_capacity(limit);
+        let mut matched = 0_usize;
         if pending > 0 {
             let mut messages = consumer.messages().await.map_err(|e| broker(&e))?;
             while let Some(message) = tokio::time::timeout(BROKER_WAIT, messages.next())
@@ -629,7 +636,11 @@ pub(crate) async fn recent(
                             .map(|v| (name.to_string(), v.as_str().to_owned()))
                     })
                     .collect();
-                found.push(Message {
+                matched += 1;
+                if found.len() == limit {
+                    found.pop_front();
+                }
+                found.push_back(Message {
                     sequence,
                     subject: message.subject.to_string(),
                     time: time.unwrap_or_default(),
@@ -641,9 +652,8 @@ pub(crate) async fn recent(
                 }
             }
         }
-        if found.len() >= limit || start == state.first_sequence {
-            let skip = found.len().saturating_sub(limit);
-            answer.messages = found.split_off(skip);
+        if matched >= limit || start == state.first_sequence {
+            answer.messages = found.into();
             return Ok(answer);
         }
         back = back.saturating_mul(4);

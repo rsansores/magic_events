@@ -42,6 +42,18 @@ CREATE TABLE magic_events.outbox (
 -- lead it.
 CREATE INDEX outbox_pending ON magic_events.outbox (id) WHERE parked_at IS NULL;
 
+-- The status's: what was set aside, however many rows are pending.
+CREATE INDEX outbox_parked ON magic_events.outbox (id) WHERE parked_at IS NOT NULL;
+
+-- A queue: rows are inserted and deleted all day, and the relay reads its
+-- head every pass. Vacuumed every thousand dead rows, whatever the table's
+-- size, and without the default's pauses, so the head it reads stays short.
+ALTER TABLE magic_events.outbox SET (
+    autovacuum_vacuum_scale_factor = 0,
+    autovacuum_vacuum_threshold = 1000,
+    autovacuum_vacuum_cost_delay = 0
+);
+
 COMMENT ON TABLE magic_events.outbox IS
     'Events committed and not published yet, in emit order. A parked row is one the broker '
     'refused three times: it waits for `Events::unpark`, and holds back nothing else.';

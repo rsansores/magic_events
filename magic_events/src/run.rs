@@ -241,6 +241,12 @@ impl Events {
     /// five seconds leaves its part out and says why, so the answer still
     /// shows what the database knows.
     ///
+    /// Counting the messages per subject reads every subject the filter
+    /// takes: with an id in every subject — one per order, say — that is a
+    /// subject per message, and the broker may not answer in time. Put in a
+    /// subject what a consumer filters by (a store, a tenant), and ids in the
+    /// body.
+    ///
     /// # Errors
     ///
     /// [`Error::Misuse`] for a filter that is not a subject filter under the
@@ -255,9 +261,9 @@ impl Events {
         .await
     }
 
-    /// The last `limit` messages the stream holds under `filter`, oldest
-    /// first, with their headers and bodies: read through the broker's
-    /// ephemeral ordered consumers, which leave nothing behind.
+    /// The last `limit` messages — 1,000 at most — the stream holds under
+    /// `filter`, oldest first, with their headers and bodies: read through the
+    /// broker's ephemeral ordered consumers, which leave nothing behind.
     ///
     /// # Errors
     ///

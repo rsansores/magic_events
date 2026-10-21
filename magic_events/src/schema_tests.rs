@@ -97,3 +97,30 @@ async fn the_outbox_cannot_be_truncated(pool: PgPool) {
         .to_string();
     assert!(refused.contains("holds committed events"), "{refused}");
 }
+
+/// The outbox is a queue: vacuumed by the thousand dead rows, whatever its
+/// size, and read by the relay and the status each through an index.
+#[sqlx::test(migrations = false)]
+async fn the_outbox_is_kept_as_a_queue(pool: PgPool) {
+    Events::install(&pool).await.unwrap();
+    let options: Vec<String> = sqlx::query_scalar(
+        "SELECT unnest(reloptions) FROM pg_class WHERE oid = 'magic_events.outbox'::regclass",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        options.contains(&"autovacuum_vacuum_scale_factor=0".to_owned()),
+        "{options:?}"
+    );
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes WHERE schemaname = 'magic_events' \
+            AND tablename = 'outbox' ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for index in ["outbox_parked", "outbox_pending"] {
+        assert!(indexes.contains(&index.to_owned()), "{indexes:?}");
+    }
+}
