@@ -3,6 +3,7 @@
 //! kept to the settings; and what it cannot run with refused at start.
 
 use super::*;
+use crate::status::Filter;
 use crate::tests::{count, emit_each, shipped, until, Broker};
 use crate::Storage;
 use std::time::Duration;
@@ -319,5 +320,130 @@ async fn pass_now_stands_aside_for_a_running_relay(pool: PgPool) {
     until("it leads", || async { count(&pool, HELD).await == 1 }).await;
     assert_eq!(events.pass_now().await.unwrap(), None);
     events.stop().await;
+    broker.done().await;
+}
+
+/// A role of its own for one test, granted `grants` on the crate's schema,
+/// which the test's login role may set: roles are the cluster's, so its name
+/// is the test's alone, and `drop_role` takes it away again.
+async fn role(pool: &PgPool, grants: &[&str]) -> String {
+    let name = format!("relay_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(&format!("CREATE ROLE {name} NOLOGIN"))
+        .execute(pool)
+        .await
+        .unwrap();
+    for grant in grants {
+        sqlx::query(&format!("GRANT {grant} TO {name}"))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    name
+}
+
+async fn drop_role(pool: &PgPool, name: &str) {
+    for sql in [format!("DROP OWNED BY {name}"), format!("DROP ROLE {name}")] {
+        sqlx::query(&sql).execute(pool).await.unwrap();
+    }
+}
+
+/// What the README grants the relay's role.
+const RELAY_GRANTS: &[&str] = &[
+    "USAGE ON SCHEMA magic_events",
+    "SELECT, UPDATE, DELETE ON magic_events.outbox",
+    "SELECT, UPDATE ON magic_events.relay",
+    "SELECT, INSERT, UPDATE ON magic_events.published",
+    "SELECT ON magic_events.version",
+];
+
+/// With a role, the relay's session and the crate's own transactions run as
+/// it: the grants the README names are all it needs to start, publish,
+/// answer a status and unpark.
+#[sqlx::test(migrations = false)]
+async fn with_a_role_it_runs_on_the_relays_grants_alone(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    let relay = role(&pool, RELAY_GRANTS).await;
+    let events = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone().role(&relay),
+    )
+    .await
+    .unwrap();
+    emit_each(&pool, &[shipped("north", 1), shipped("south", 2)]).await;
+    until("both published", || async {
+        broker.bodies().await.len() == 2
+    })
+    .await;
+    until("both deleted", || async {
+        count(&pool, "SELECT count(*) FROM magic_events.outbox").await == 0
+    })
+    .await;
+    let status = events.status(&Filter::all()).await.unwrap();
+    assert_eq!(status.outbox.pending, 0);
+    assert_eq!(events.unpark_all().await.unwrap(), 0);
+    events.stop().await;
+    drop_role(&pool, &relay).await;
+    broker.done().await;
+}
+
+/// The relay's session is the role's, not the login role's: a role that may
+/// not delete from the outbox publishes, and fails to take the rows away.
+#[sqlx::test(migrations = false)]
+async fn the_relays_session_is_the_roles(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    let relay = role(
+        &pool,
+        &[
+            "USAGE ON SCHEMA magic_events",
+            "SELECT, UPDATE ON magic_events.outbox",
+            "SELECT, UPDATE ON magic_events.relay",
+            "SELECT, INSERT, UPDATE ON magic_events.published",
+            "SELECT ON magic_events.version",
+        ],
+    )
+    .await;
+    let events = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone().role(&relay),
+    )
+    .await
+    .unwrap();
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    until("published", || async { broker.bodies().await.len() == 1 }).await;
+    // A pass, and the retry after it, would have deleted it as the login role.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(broker.bodies().await.len(), 1, "sent again, deduplicated");
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM magic_events.outbox").await,
+        1
+    );
+    events.stop().await;
+    drop_role(&pool, &relay).await;
+    broker.done().await;
+}
+
+/// A role the login role may not hold is refused at start, before anything
+/// runs: the start-up checks are the role's too.
+#[sqlx::test(migrations = false)]
+async fn a_role_without_the_grants_is_refused_at_start(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    let bare = role(&pool, &[]).await;
+    let refused = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone().role(&bare),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("permission denied"),
+        "{refused}"
+    );
+    drop_role(&pool, &bare).await;
     broker.done().await;
 }

@@ -347,11 +347,24 @@ struct RelayRow {
 }
 
 /// The database's part of a status, in one snapshot.
-async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Result<Status, Error> {
+async fn database(
+    pool: &PgPool,
+    settings: &Settings,
+    filter: &str,
+    all: bool,
+) -> Result<Status, Error> {
+    let prefix = settings.subject_prefix.as_str();
     let mut tx = pool.begin().await?;
+    // The isolation level before anything else: it can only be set first.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
+    if let Some(role) = &settings.role {
+        sqlx::query("SELECT set_config('role', $1, true)")
+            .bind(role)
+            .execute(&mut *tx)
+            .await?;
+    }
     // Every subject under the prefix is every row: no pattern to match. A
     // narrower filter starts with the prefix's tokens (`Filter::resolve`
     // holds it to that), and a row's subject is what follows them.
@@ -543,7 +556,7 @@ pub(crate) async fn status(
     let all = subject == crate::stream::subjects(settings);
     let mut status = crate::relay::bounded(
         settings.database_timeout,
-        database(pool, &settings.subject_prefix, &subject, all),
+        database(pool, settings, &subject, all),
     )
     .await?;
     match tokio::time::timeout(

@@ -96,7 +96,9 @@ impl Events {
         settings: Settings,
     ) -> Result<Relay, Error> {
         settings.check()?;
-        schema::check(&mut *pool.acquire().await?).await?;
+        let mut tx = crate::relay::begin(&pool, &settings).await?;
+        schema::check(&mut tx).await?;
+        tx.commit().await?;
         Ok(Relay {
             pool,
             publish,
@@ -111,7 +113,7 @@ impl Events {
     /// either way: the relay takes it again as it starts.
     async fn probe(relay: &Relay) -> Result<(), Error> {
         let wait = relay.settings.database_timeout;
-        let Some(mut lock) = Lock::take(&relay.pool, wait).await? else {
+        let Some(mut lock) = Lock::take(&relay.pool, &relay.settings).await? else {
             return Ok(());
         };
         let fenced = crate::relay::bounded(wait, async {
@@ -126,10 +128,12 @@ impl Events {
     /// Records the relay's `max_body`, which `emit` holds bodies to: the
     /// last process to start says it for all of them.
     pub(crate) async fn record(relay: &Relay) -> Result<(), Error> {
+        let mut tx = crate::relay::begin(&relay.pool, &relay.settings).await?;
         sqlx::query("UPDATE magic_events.relay SET max_body = $1 WHERE id = 1")
             .bind(i32::try_from(relay.settings.max_body).unwrap_or(i32::MAX))
-            .execute(&relay.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -226,9 +230,7 @@ impl Events {
     /// What stopped the pass: [`Error::Broker`] when the broker failed it,
     /// [`Error::Database`] when the database did.
     pub async fn pass_now(&self) -> Result<Option<usize>, Error> {
-        let Some(mut lock) =
-            Lock::take(&self.relay.pool, self.relay.settings.database_timeout).await?
-        else {
+        let Some(mut lock) = Lock::take(&self.relay.pool, &self.relay.settings).await? else {
             return Ok(None);
         };
         let done = self
@@ -298,13 +300,15 @@ impl Events {
     }
 
     async fn unpark_where(&self, id: Option<i64>) -> Result<u64, Error> {
+        let mut tx = crate::relay::begin(&self.relay.pool, &self.relay.settings).await?;
         let done = sqlx::query(
             "UPDATE magic_events.outbox SET parked_at = NULL, attempts = 0 \
               WHERE parked_at IS NOT NULL AND ($1::bigint IS NULL OR id = $1)",
         )
         .bind(id)
-        .execute(&self.relay.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(done.rows_affected())
     }
 }

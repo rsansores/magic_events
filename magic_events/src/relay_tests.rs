@@ -11,6 +11,13 @@ use sqlx::PgPool;
 /// How long a test's relay waits for the database.
 const WAIT: Duration = Duration::from_secs(30);
 
+/// Settings whose database wait is `wait`: what the lock is taken with.
+fn waiting(wait: Duration) -> Settings {
+    let mut settings = Settings::new("LOCK", "test");
+    settings.database_timeout = wait;
+    settings
+}
+
 /// Passes until the outbox has nothing left to publish.
 async fn drain(events: &Events) {
     while events.pass_now().await.unwrap().expect("the lock") > 0 {}
@@ -221,7 +228,7 @@ async fn a_message_published_and_not_deleted_is_held_once(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1), shipped("north", 2)]).await;
-    let mut lock = Lock::take(&pool, WAIT).await.unwrap().unwrap();
+    let mut lock = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
     let mut rows = events_relay(&events).pending(&mut lock).await.unwrap();
     let published = events_relay(&events).send(&mut rows).await;
     assert_eq!((published.acked, published.failure), (2, None));
@@ -356,7 +363,7 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1)]).await;
     let relay = events_relay(&events);
-    let mut lock = Lock::take(&pool, WAIT).await.unwrap().unwrap();
+    let mut lock = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
     let mut rows = relay.pending(&mut lock).await.unwrap();
     let published = relay.send(&mut rows).await;
     sqlx::query(
@@ -390,7 +397,7 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn a_transaction_on_a_connection_without_the_lock_is_refused(pool: PgPool) {
     Events::install(&pool).await.unwrap();
-    let held = Lock::take(&pool, WAIT).await.unwrap().unwrap();
+    let held = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
     let mut elsewhere = Lock {
         conn: pool.acquire().await.unwrap().detach(),
         wait: WAIT,
@@ -418,7 +425,7 @@ async fn a_relay_the_database_does_not_answer_lets_its_lock_go(pool: PgPool) {
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1)]).await;
     let wait = Duration::from_millis(500);
-    let mut lock = Lock::take(&pool, wait).await.unwrap().unwrap();
+    let mut lock = Lock::take(&pool, &waiting(wait)).await.unwrap().unwrap();
     let user_timeout: String = sqlx::query_scalar("SHOW tcp_user_timeout")
         .fetch_one(&mut lock.conn)
         .await
@@ -439,7 +446,11 @@ async fn a_relay_the_database_does_not_answer_lets_its_lock_go(pool: PgPool) {
     );
     drop(lock);
     until("another takes the lock", || async {
-        Lock::take(&pool, wait).await.ok().flatten().is_some()
+        Lock::take(&pool, &waiting(wait))
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     })
     .await;
     blocker.rollback().await.unwrap();

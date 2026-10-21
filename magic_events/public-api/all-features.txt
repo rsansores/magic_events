@@ -307,6 +307,7 @@ pub fn magic_events::Settings::max_body(self, u32) -> Self
 pub fn magic_events::Settings::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn magic_events::Settings::replicas(self, usize) -> Self
 pub fn magic_events::Settings::retention(self, core::time::Duration) -> Self
+pub fn magic_events::Settings::role(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn magic_events::Settings::send_timeout(self, core::time::Duration) -> Self
 pub fn magic_events::Settings::standby(self, core::time::Duration) -> Self
 pub fn magic_events::Settings::storage(self, magic_events::Storage) -> Self

@@ -229,6 +229,15 @@ and `DELETE` on the outbox, `SELECT` and `UPDATE` on `magic_events.relay`,
 `SELECT`, `INSERT` and `UPDATE` on `magic_events.published`, and `SELECT` on
 `magic_events.version`.
 
+The relay's role is the one your pool logs in as, unless
+`Settings::role` names another: then the relay's session and the crate's
+own transactions — start, status, unpark — run as that role
+(`SET ROLE`), which the login role must be allowed to set. A host whose
+transactions each take a role of their own, under row security say, gives
+the relay's grants to a role of the relay's, and no other role reads the
+outbox. `emit` runs as your transaction does; `Events::install` as the login
+role, which owns what it creates.
+
 Every setting has a default and a setter:
 
 ```rust
@@ -252,6 +261,7 @@ Settings::new("SHOP_EVENTS", "//shop.example.com")
 | `backoff` | 500 ms to 60 s | how long the relay waits after a failed pass, doubling |
 | `standby` | 30 s | how often a process that is not the relay asks for its lock; with `send_timeout` and 30 s, within `duplicate_window` |
 | `max_body` | 64 KiB | the largest body `emit` takes; held to the broker's `max_payload` at start |
+| `role` | the login role | the role the relay and the crate's own transactions run as |
 
 The relay runs inside your process, in a task of its own: no service to
 deploy. Every process that calls `Events::start` competes for one advisory
@@ -438,7 +448,9 @@ relay's transactions would run where its lock is not. (The lock it took to
 find out may stay on the pooler's server connection until the pooler
 recycles it — one more reason to give the relay a direct connection.) The
 relay's connection is its own, opened with the pool's options: one more than
-the pool's `max_connections`, without its `after_connect`.
+the pool's `max_connections`, without its `after_connect` — what a session
+needs set, set it with the connect options, or the role with
+`Settings::role`.
 
 ## Performance
 

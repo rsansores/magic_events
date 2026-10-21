@@ -69,6 +69,24 @@ fn unanswered(wait: Duration) -> Error {
     )))
 }
 
+/// A transaction of `pool` as the settings' role, when they name one: for
+/// the crate's own work outside the relay's session. `SET LOCAL` — the role
+/// is let go at commit or rollback, so the connection goes back to the pool
+/// as it came.
+pub(crate) async fn begin(
+    pool: &PgPool,
+    settings: &Settings,
+) -> Result<Transaction<'static, Postgres>, Error> {
+    let mut tx = pool.begin().await?;
+    if let Some(role) = &settings.role {
+        sqlx::query("SELECT set_config('role', $1, true)")
+            .bind(role)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(tx)
+}
+
 /// `work`, or an error once `wait` passed without its answer.
 pub(crate) async fn bounded<T>(
     wait: Duration,
@@ -93,13 +111,21 @@ impl Lock {
     /// not taken from it: it lives as long as the lock, and closes, letting go
     /// of the lock, when it is dropped — or `None` when another session holds
     /// it.
-    pub(crate) async fn take(pool: &PgPool, wait: Duration) -> Result<Option<Lock>, Error> {
+    /// The session runs as the settings' role, when they name one.
+    pub(crate) async fn take(pool: &PgPool, settings: &Settings) -> Result<Option<Lock>, Error> {
+        let wait = settings.database_timeout;
         bounded(wait, async {
             let mut conn = PgConnection::connect_with(&pool.connect_options()).await?;
             sqlx::query(SESSION)
                 .bind(wait.as_millis().to_string())
                 .execute(&mut conn)
                 .await?;
+            if let Some(role) = &settings.role {
+                sqlx::query("SELECT set_config('role', $1, false)")
+                    .bind(role)
+                    .execute(&mut conn)
+                    .await?;
+            }
             let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
                 .bind(LOCK_KEY)
                 .fetch_one(&mut conn)
@@ -187,7 +213,7 @@ impl Relay {
     /// The lock, once this process gets it.
     async fn lock(&self) -> Lock {
         loop {
-            match Lock::take(&self.pool, self.settings.database_timeout).await {
+            match Lock::take(&self.pool, &self.settings).await {
                 Ok(Some(lock)) => return lock,
                 Ok(None) => tracing::debug!("events: another process runs the relay — standing by"),
                 Err(e) => tracing::warn!("events: the relay's lock could not be asked for: {e}"),

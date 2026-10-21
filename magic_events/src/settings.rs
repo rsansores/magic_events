@@ -66,6 +66,7 @@ pub struct Settings {
     pub(crate) backoff: (Duration, Duration),
     pub(crate) standby: Duration,
     pub(crate) max_body: u32,
+    pub(crate) role: Option<String>,
     /// How long a statement of the relay's may take before the relay counts
     /// the database as away, lets go of its lock and stands by.
     pub(crate) database_timeout: Duration,
@@ -96,6 +97,7 @@ impl Settings {
             backoff: (Duration::from_millis(500), Duration::from_secs(60)),
             standby: Duration::from_secs(30),
             max_body: MAX_BODY,
+            role: None,
             database_timeout: Duration::from_secs(30),
         }
     }
@@ -209,6 +211,23 @@ impl Settings {
         self
     }
 
+    /// The database role the crate's own work runs as: the relay's session,
+    /// and the transactions of [`Events::start`](crate::Events::start),
+    /// [`Events::status`](crate::Events::status) and
+    /// [`Events::unpark`](crate::Events::unpark). The role the pool logs in
+    /// as by default. With one, the pool's login role must be allowed to
+    /// `SET ROLE` to it, and the grants the relay needs are this role's:
+    /// a host whose transactions each assume a role of their own — under row
+    /// security, say — keeps the outbox out of every role but the relay's.
+    /// [`emit`](crate::emit) runs in the caller's transaction, as the
+    /// caller's role; [`Events::install`](crate::Events::install) runs as
+    /// the login role, which owns what it creates.
+    #[must_use]
+    pub fn role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
+        self
+    }
+
     /// Refuses settings the relay cannot run with.
     pub(crate) fn check(&self) -> Result<(), Error> {
         let misuse = |why: String| Err(Error::Misuse(why));
@@ -223,6 +242,9 @@ impl Settings {
                  `.`, `*`, `>`, `/` or `\\`",
                 self.stream
             ));
+        }
+        if self.role.as_deref() == Some("") {
+            return misuse("an empty role: name one, or leave the login role's".to_owned());
         }
         if self.source.is_empty() {
             return misuse("an empty source: CloudEvents requires one".to_owned());

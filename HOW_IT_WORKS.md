@@ -76,7 +76,11 @@ PostgreSQL releases the lock, and a process standing by takes it.
 The lock's session is set so the server ends it when the relay is gone
 without saying so: TCP keepalives after 10 s of silence, every 5 s, three
 missed; anything sent and unacknowledged for 20 s; a statement running past
-30 s cancelled; and the client looked for every 5 s while one runs. So a
+30 s cancelled; and the client looked for every 5 s while one runs. With
+`Settings::role`, the session sets that role too (`SET ROLE`), and every
+transaction of the crate's own outside it — start's checks, status, unpark —
+sets it for itself (`SET LOCAL ROLE`), so the connection goes back to the
+pool as it came. So a
 leader whose network dies — a partition, a frozen machine — loses its lock
 within about 30 seconds, not the hours the defaults take. On its side, every
 statement the relay sends is bounded by the same 30 s: a database that

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1 — unreleased
+
+Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.
+
+- **`Settings::role`**: the database role the crate's own work runs as — the
+  relay's session, and the transactions of `Events::start`,
+  `Events::status` and `Events::unpark` — rather than the role the pool logs
+  in as. For a host whose transactions each assume a role of their own,
+  under row security say: the relay's grants go to that role alone, and the
+  host's pool stays the one pool. `emit` runs as the caller's transaction
+  does, and `Events::install` as the login role. API: one method added.
+
 ## 0.1.0 — 2026-10-21
 
 The first release. Schema 1. Dashboard contract 1.
