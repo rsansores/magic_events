@@ -250,7 +250,7 @@ Settings::new("SHOP_EVENTS", "//shop.example.com")
 | `in_flight` | 64 | messages sent and not acknowledged yet |
 | `send_timeout` | 10 s | how long a message may wait for its acknowledgement |
 | `backoff` | 500 ms to 60 s | how long the relay waits after a failed pass, doubling |
-| `standby` | 30 s | how often a process that is not the relay asks for its lock |
+| `standby` | 30 s | how often a process that is not the relay asks for its lock; with `send_timeout` and 30 s, within `duplicate_window` |
 | `max_body` | 64 KiB | the largest body `emit` takes; held to the broker's `max_payload` at start |
 
 The relay runs inside your process, in a task of its own: no service to
@@ -432,9 +432,13 @@ tx.commit().await?;
 **Under a pooler.** `emit` is a statement of your transaction: any pooler
 mode serves it. The relay holds a session-level advisory lock on one
 connection for as long as it runs, so the pool you give `Events::start`
-must reach the database directly, or through a pooler in session mode. In
-transaction mode the relay's transactions run where its lock is not: it
-publishes nothing, and logs an error that names the pooler.
+must reach the database directly, or through a pooler in session mode.
+`Events::start` refuses a pooler in transaction mode, naming it: there the
+relay's transactions would run where its lock is not. (The lock it took to
+find out may stay on the pooler's server connection until the pooler
+recycles it — one more reason to give the relay a direct connection.) The
+relay's connection is its own, opened with the pool's options: one more than
+the pool's `max_connections`, without its `after_connect`.
 
 ## Performance
 

@@ -88,7 +88,9 @@ inside each, that the server process it runs on holds the lock
 its lock — its connection killed while it was publishing — commits nothing,
 so it can never delete rows a new leader is publishing. It also catches a
 pooler in transaction mode, which may run each transaction on another
-server process: the relay then publishes nothing and says why.
+server process: `Events::start` takes the lock and opens a fenced
+transaction once, as a probe, and refuses to start, naming the pooler, when
+the fence fails; a relay that meets it later publishes nothing and says why.
 
 At the top of every loop the leader checks its lock is still there; if not,
 it stands by again.

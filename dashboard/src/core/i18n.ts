@@ -84,7 +84,6 @@ const en: MessageTable = {
   'consumer.never': 'Never',
   'published.title': 'Published',
   'published.none': 'Nothing was published lately.',
-  'published.day': 'Day',
   'published.type': 'Type',
   'published.count': 'Events',
   'recent.title': 'Recent events',
@@ -107,10 +106,11 @@ export function mergeMessages(over: Messages | undefined): Messages {
   return merged
 }
 
-/** How the dashboard says things in `locale` (normalized first), from
- * `messages` (the built-in ones by default); English stands in for a key
- * the locale lacks. */
-export function translator(locale: string, messages: Messages = builtinMessages): Translate {
+/** How the dashboard says things in `locale` (normalized first), from the
+ * built-in messages with `over`'s laid over them; English stands in for a
+ * key the locale lacks. */
+export function translator(locale: string, over?: Messages): Translate {
+  const messages = mergeMessages(over)
   const tag = normalizeLocale(locale)
   const table = tableFor(messages, tag)
   return (key, params) => {

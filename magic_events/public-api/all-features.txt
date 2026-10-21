@@ -98,7 +98,7 @@ impl core::marker::UnsafeUnpin for magic_events::status::Outbox
 impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Outbox
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Outbox
 #[non_exhaustive] pub struct magic_events::status::Parked
-pub magic_events::status::Parked::attempts: i32
+pub magic_events::status::Parked::attempts: u32
 pub magic_events::status::Parked::emitted_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
 pub magic_events::status::Parked::event_id: uuid::Uuid
 pub magic_events::status::Parked::id: i64
@@ -154,7 +154,7 @@ impl core::marker::UnsafeUnpin for magic_events::status::Recent
 impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Recent
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Recent
 #[non_exhaustive] pub struct magic_events::status::Relay
-pub magic_events::status::Relay::failures: i32
+pub magic_events::status::Relay::failures: u32
 pub magic_events::status::Relay::last_error: core::option::Option<alloc::string::String>
 pub magic_events::status::Relay::last_published_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
 pub magic_events::status::Relay::retry_after: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>

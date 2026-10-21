@@ -10,7 +10,7 @@
 
 import { computed, ref, shallowRef, useId } from 'vue'
 import type { Recent, Status } from '../core/contract/types.js'
-import { describeLastPublished, describeSince } from '../core/describe.js'
+import { describeLastPublished, describeSince, mismatchOf } from '../core/describe.js'
 import { recentOf, type RecentRow } from '../core/derive.js'
 import { count } from '../core/format.js'
 import type { Messages } from '../core/i18n.js'
@@ -47,8 +47,10 @@ const recentError = ref<string | null>(null)
 async function showRecent() {
   if (!props.fetchRecent) return
   try {
-    recent.value = recentOf(await props.fetchRecent())
-    recentError.value = null
+    const answer = await props.fetchRecent()
+    const mismatch = mismatchOf(answer, t)
+    recent.value = mismatch ? null : recentOf(answer)
+    recentError.value = mismatch
   } catch (e) {
     recentError.value = t('fetch.failed', { error: e instanceof Error ? e.message : String(e) })
   }

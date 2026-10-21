@@ -63,12 +63,12 @@ impl Publish for async_nats::jetstream::Context {
 /// server or the stream. Anything else — a timeout, no stream answering, the
 /// connection lost, the stream unable to take more — is the broker's state,
 /// and the same message may go through later; a refusal nobody listed is
-/// retried, and shows in the relay's status, rather than set aside.
+/// retried, and shows in the relay's status, rather than set aside. (The
+/// relay sets no expected last id or sequence, so the broker never refuses
+/// a message for those.)
 fn failure(e: &PublishError) -> Failure {
     let permanent = match e.kind() {
-        PublishErrorKind::MaxPayloadExceeded
-        | PublishErrorKind::WrongLastMessageId
-        | PublishErrorKind::WrongLastSequence => true,
+        PublishErrorKind::MaxPayloadExceeded => true,
         PublishErrorKind::Other => std::error::Error::source(e)
             .and_then(|s| s.downcast_ref::<async_nats::jetstream::Error>())
             .is_some_and(|api| {

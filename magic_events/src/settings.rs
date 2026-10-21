@@ -191,7 +191,10 @@ impl Settings {
     }
 
     /// How often a process that is not the relay asks for the relay's lock:
-    /// 30 s by default.
+    /// 30 s by default. With `send_timeout` and 30 s for the server to let a
+    /// dead relay's lock go, within `duplicate_window`: a takeover inside the
+    /// window sends nothing twice, and `start` refuses settings that would not
+    /// fit.
     #[must_use]
     pub fn standby(mut self, standby: Duration) -> Self {
         self.standby = standby;
@@ -265,6 +268,20 @@ impl Settings {
                 self.duplicate_window, self.retention
             ));
         }
+        // A relay that died after the stream took a message, and before it
+        // deleted the row, is followed by one that sends it again: within
+        // the window, the stream drops it. The next relay takes over within
+        // `standby`, the server letting the dead one's lock go within its
+        // own wait, and sends within `send_timeout`.
+        let takeover = self.standby + self.database_timeout + self.send_timeout;
+        if self.duplicate_window < takeover {
+            return misuse(format!(
+                "`duplicate_window` ({:?}) is shorter than a takeover may take — `standby`, the \
+                 database's 30 s and `send_timeout`, {takeover:?}: a message sent again after it \
+                 would be kept twice",
+                self.duplicate_window
+            ));
+        }
         for (what, n) in [
             ("batch", self.batch),
             ("in_flight", self.in_flight),
@@ -336,6 +353,10 @@ mod tests {
                 "`duplicate_window`",
             ),
             (base().in_flight(0), "`in_flight`"),
+            (
+                base().standby(Duration::from_secs(300)),
+                "a takeover may take",
+            ),
             (base().batch(0), "`batch`"),
             (base().max_body(0), "`max_body`"),
             (base().replicas(0), "`replicas`"),

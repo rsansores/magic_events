@@ -90,10 +90,6 @@ impl Filter {
         }
         Ok(subject.clone())
     }
-
-    fn is_all(&self) -> bool {
-        self.subject.is_none()
-    }
 }
 
 /// The filter `filter` as a regular expression PostgreSQL matches a full
@@ -179,7 +175,7 @@ pub struct Parked {
     #[serde(rename = "type")]
     pub ty: String,
     /// Times the broker refused it.
-    pub attempts: i32,
+    pub attempts: u32,
     /// Why, the last time.
     pub last_error: Option<String>,
     /// When it was emitted.
@@ -198,7 +194,7 @@ pub struct Relay {
     /// When the stream last acknowledged a message.
     pub last_published_at: Option<DateTime<Utc>>,
     /// Passes the broker failed in a row; 0 once one goes through.
-    pub failures: i32,
+    pub failures: u32,
     /// Why the last of them failed.
     pub last_error: Option<String>,
     /// When the relay tries again after them.
@@ -356,17 +352,21 @@ async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Resul
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
-    // Every subject under the prefix is every row: no pattern to match.
-    let pattern = (!all).then(|| pattern(filter));
+    // Every subject under the prefix is every row: no pattern to match. A
+    // narrower filter starts with the prefix's tokens (`Filter::resolve`
+    // holds it to that), and a row's subject is what follows them.
+    let pattern = (!all).then(|| {
+        let skip = prefix.split('.').count();
+        pattern(&filter.split('.').skip(skip).collect::<Vec<_>>().join("."))
+    });
     let (at, pending, oldest, parked): (DateTime<Utc>, i64, Option<DateTime<Utc>>, i64) =
         sqlx::query_as(
             "SELECT now(), \
                     count(*) FILTER (WHERE parked_at IS NULL), \
                     min(emitted_at) FILTER (WHERE parked_at IS NULL), \
                     count(*) FILTER (WHERE parked_at IS NOT NULL) \
-               FROM magic_events.outbox WHERE $2::text IS NULL OR ($1 || '.' || subject) ~ $2",
+               FROM magic_events.outbox WHERE $1::text IS NULL OR subject ~ $1",
         )
-        .bind(prefix)
         .bind(&pattern)
         .fetch_one(&mut *tx)
         .await?;
@@ -374,7 +374,7 @@ async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Resul
         "SELECT id, event_id, $1 || '.' || subject AS subject, type, attempts, last_error, \
                 emitted_at, parked_at \
            FROM magic_events.outbox \
-          WHERE parked_at IS NOT NULL AND ($2::text IS NULL OR ($1 || '.' || subject) ~ $2) \
+          WHERE parked_at IS NOT NULL AND ($2::text IS NULL OR subject ~ $2) \
           ORDER BY id LIMIT $3",
     )
     .bind(prefix)
@@ -429,7 +429,7 @@ async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Resul
                     event_id: r.event_id,
                     subject: r.subject,
                     ty: r.ty,
-                    attempts: r.attempts,
+                    attempts: u32::try_from(r.attempts).unwrap_or(0),
                     last_error: r.last_error,
                     emitted_at: r.emitted_at,
                     parked_at: r.parked_at,
@@ -439,7 +439,7 @@ async fn database(pool: &PgPool, prefix: &str, filter: &str, all: bool) -> Resul
         relay: Relay {
             running: relay.running,
             last_published_at: relay.last_published_at,
-            failures: relay.failures,
+            failures: u32::try_from(relay.failures).unwrap_or(0),
             last_error: relay.last_error,
             retry_after: relay.retry_after,
         },
@@ -458,16 +458,11 @@ async fn broker(
     filter: &str,
     all: bool,
 ) -> Result<(Stream, Option<Vec<Consumer>>), String> {
-    let mut stream = jetstream
+    let stream = jetstream
         .get_stream(name)
         .await
         .map_err(|e| format!("the stream `{name}` could not be read: {e}"))?;
-    let state = stream
-        .info()
-        .await
-        .map_err(|e| format!("the stream `{name}` could not be read: {e}"))?
-        .state
-        .clone();
+    let state = stream.cached_info().state.clone();
     let mut counts: Vec<SubjectCount> = stream
         .info_with_subjects(filter)
         .await
@@ -544,8 +539,13 @@ pub(crate) async fn status(
     filter: &Filter,
 ) -> Result<Status, Error> {
     let subject = filter.resolve(settings)?;
-    let all = filter.is_all();
-    let mut status = database(pool, &settings.subject_prefix, &subject, all).await?;
+    // `Filter::subject("<prefix>.>")` is every subject, as `Filter::all()` is.
+    let all = subject == crate::stream::subjects(settings);
+    let mut status = crate::relay::bounded(
+        settings.database_timeout,
+        database(pool, &settings.subject_prefix, &subject, all),
+    )
+    .await?;
     match tokio::time::timeout(
         BROKER_WAIT,
         broker(jetstream, &settings.stream, &subject, all),
@@ -563,8 +563,9 @@ pub(crate) async fn status(
 }
 
 /// The last `limit` messages under `filter`, oldest first, read through
-/// ordered consumers of the broker's own — ephemeral, nothing left behind —
-/// each starting further back until it has them or the stream's start.
+/// ordered consumers of the broker's own, each deleted once read — nothing
+/// left behind — and each starting further back until it has them or the
+/// stream's start; within `RECENT_WAIT` in all.
 pub(crate) async fn recent(
     jetstream: &Context,
     settings: &Settings,
@@ -572,26 +573,53 @@ pub(crate) async fn recent(
     limit: u32,
 ) -> Result<Recent, Error> {
     let subject = filter.resolve(settings)?;
-    let broker = |e: &dyn std::fmt::Display| Error::Broker {
-        reason: format!("the stream `{}` could not be read: {e}", settings.stream),
-        transient: true,
-    };
     let limit = usize::try_from(limit.min(RECENT_MOST)).unwrap_or(usize::MAX);
-    let mut answer = Recent {
-        contract: CONTRACT,
-        filter: subject.clone(),
-        messages: Vec::new(),
+    let read = async {
+        let messages = if limit == 0 {
+            Vec::new()
+        } else {
+            last(jetstream, &settings.stream, &subject, limit).await?
+        };
+        Ok(Recent {
+            contract: CONTRACT,
+            filter: subject.clone(),
+            messages,
+        })
     };
-    if limit == 0 {
-        return Ok(answer);
-    }
-    let mut stream = jetstream
-        .get_stream(&settings.stream)
+    tokio::time::timeout(RECENT_WAIT, read)
         .await
-        .map_err(|e| broker(&e))?;
-    let state = stream.info().await.map_err(|e| broker(&e))?.state.clone();
+        .unwrap_or_else(|_| {
+            Err(unread(
+                &settings.stream,
+                &format!("no answer within {RECENT_WAIT:?}"),
+            ))
+        })
+}
+
+/// How long `recent` may take, every round of it.
+const RECENT_WAIT: Duration = Duration::from_secs(15);
+
+fn unread(stream: &str, why: &dyn std::fmt::Display) -> Error {
+    Error::Broker {
+        reason: format!("the stream `{stream}` could not be read: {why}"),
+        transient: true,
+    }
+}
+
+/// The last `limit` messages of `name` under `subject`, oldest first.
+async fn last(
+    jetstream: &Context,
+    name: &str,
+    subject: &str,
+    limit: usize,
+) -> Result<Vec<Message>, Error> {
+    let stream = jetstream
+        .get_stream(name)
+        .await
+        .map_err(|e| unread(name, &e))?;
+    let state = stream.cached_info().state.clone();
     if state.messages == 0 {
-        return Ok(answer);
+        return Ok(Vec::new());
     }
     let mut back = u64::try_from(limit).unwrap_or(u64::MAX).saturating_mul(4);
     loop {
@@ -601,64 +629,82 @@ pub(crate) async fn recent(
             .max(state.first_sequence);
         let consumer = stream
             .create_consumer(OrderedConfig {
-                filter_subject: subject.clone(),
+                filter_subject: subject.to_owned(),
                 deliver_policy: DeliverPolicy::ByStartSequence {
                     start_sequence: start,
                 },
                 ..Default::default()
             })
             .await
-            .map_err(|e| broker(&e))?;
-        let mut consumer = consumer;
-        let pending = consumer.info().await.map_err(|e| broker(&e))?.num_pending;
-        // The last `limit` read so far: what is read before them is let go.
-        let mut found = std::collections::VecDeque::with_capacity(limit);
-        let mut matched = 0_usize;
-        if pending > 0 {
-            let mut messages = consumer.messages().await.map_err(|e| broker(&e))?;
-            while let Some(message) = tokio::time::timeout(BROKER_WAIT, messages.next())
-                .await
-                .map_err(|_| broker(&"no message within the wait"))?
-            {
-                let message = message.map_err(|e| broker(&e))?;
-                let info = message.info().map_err(|e| broker(&e))?;
-                let (sequence, time, left) =
-                    (info.stream_sequence, utc(info.published), info.pending);
-                if sequence > state.last_sequence {
-                    break;
-                }
-                let headers = message
-                    .headers
-                    .iter()
-                    .flat_map(|headers| headers.iter())
-                    .filter_map(|(name, values)| {
-                        values
-                            .first()
-                            .map(|v| (name.to_string(), v.as_str().to_owned()))
-                    })
-                    .collect();
-                matched += 1;
-                if found.len() == limit {
-                    found.pop_front();
-                }
-                found.push_back(Message {
-                    sequence,
-                    subject: message.subject.to_string(),
-                    time: time.unwrap_or_default(),
-                    headers,
-                    body: String::from_utf8_lossy(&message.payload).into_owned(),
-                });
-                if left == 0 || sequence == state.last_sequence {
-                    break;
-                }
-            }
-        }
+            .map_err(|e| unread(name, &e))?;
+        let consumer_name = consumer.cached_info().name.clone();
+        let read = round(consumer, name, state.last_sequence, limit).await;
+        // Its round over, the consumer goes, whatever the round came to.
+        let _ = stream.delete_consumer(&consumer_name).await;
+        let (found, matched) = read?;
         if matched >= limit || start == state.first_sequence {
-            answer.messages = found.into();
-            return Ok(answer);
+            return Ok(found.into());
         }
         back = back.saturating_mul(4);
     }
+}
+
+/// One round of `last`: the last `limit` messages `consumer` delivers up to
+/// the stream's `last_sequence`, and how many it delivered in all.
+async fn round(
+    mut consumer: async_nats::jetstream::consumer::Consumer<OrderedConfig>,
+    name: &str,
+    last_sequence: u64,
+    limit: usize,
+) -> Result<(std::collections::VecDeque<Message>, usize), Error> {
+    // The last `limit` read so far: what is read before them is let go.
+    let mut found = std::collections::VecDeque::with_capacity(limit);
+    let mut matched = 0_usize;
+    let pending = consumer
+        .info()
+        .await
+        .map_err(|e| unread(name, &e))?
+        .num_pending;
+    if pending == 0 {
+        return Ok((found, matched));
+    }
+    let mut messages = consumer.messages().await.map_err(|e| unread(name, &e))?;
+    while let Some(message) = tokio::time::timeout(BROKER_WAIT, messages.next())
+        .await
+        .map_err(|_| unread(name, &"no message within the wait"))?
+    {
+        let message = message.map_err(|e| unread(name, &e))?;
+        let info = message.info().map_err(|e| unread(name, &e))?;
+        let (sequence, time, left) = (info.stream_sequence, utc(info.published), info.pending);
+        if sequence > last_sequence {
+            break;
+        }
+        let headers = message
+            .headers
+            .iter()
+            .flat_map(|headers| headers.iter())
+            .filter_map(|(name, values)| {
+                values
+                    .first()
+                    .map(|v| (name.to_string(), v.as_str().to_owned()))
+            })
+            .collect();
+        matched += 1;
+        if found.len() == limit {
+            found.pop_front();
+        }
+        found.push_back(Message {
+            sequence,
+            subject: message.subject.to_string(),
+            time: time.unwrap_or_default(),
+            headers,
+            body: String::from_utf8_lossy(&message.payload).into_owned(),
+        });
+        if left == 0 || sequence == last_sequence {
+            break;
+        }
+    }
+    Ok((found, matched))
 }
 
 #[cfg(test)]

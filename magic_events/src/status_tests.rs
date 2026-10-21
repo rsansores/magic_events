@@ -143,6 +143,13 @@ async fn a_narrower_filter_answers_only_what_it_takes(pool: PgPool) {
     );
     assert!(north.consumers.is_none() && north.published.is_none());
 
+    // The prefix's every subject, spelled as a filter, is every subject.
+    let every = events
+        .status(&Filter::subject(format!("{prefix}.>")))
+        .await
+        .unwrap();
+    assert!(every.consumers.is_some() && every.published.is_some());
+
     let poison = events
         .status(&Filter::subject(format!("{prefix}.*.poison.*")))
         .await
@@ -239,13 +246,17 @@ async fn recent_reads_the_last_messages_and_leaves_nothing(pool: PgPool) {
         .unwrap();
     assert!(none.messages.is_empty());
 
-    let durable = events
-        .status(&Filter::all())
+    // Not a consumer left on the broker, durable or not.
+    let left: Vec<String> = broker
+        .jetstream
+        .get_stream(&broker.settings.stream)
         .await
         .unwrap()
-        .consumers
+        .consumer_names()
+        .try_collect()
+        .await
         .unwrap();
-    assert!(durable.is_empty(), "{durable:?}");
+    assert!(left.is_empty(), "{left:?}");
     broker.done().await;
 }
 

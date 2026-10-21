@@ -5,7 +5,7 @@
 
 import { computed, getCurrentInstance } from 'vue'
 import { normalizeLocale } from '../core/format.js'
-import { mergeMessages, translator, type Messages, type Translate } from '../core/i18n.js'
+import { translator, type Messages, type Translate } from '../core/i18n.js'
 
 export function useDashboardI18n(
   getLocale: () => string | undefined,
@@ -20,8 +20,7 @@ export function useDashboardI18n(
     return typeof l === 'string' ? l : typeof l?.value === 'string' ? l.value : undefined
   }
   const locale = computed(() => normalizeLocale(getLocale() ?? hostLocale()))
-  const messages = computed(() => mergeMessages(getMessages()))
-  const translate = computed(() => translator(locale.value, messages.value))
+  const translate = computed(() => translator(locale.value, getMessages()))
   const t: Translate = (key, params) => translate.value(key, params)
   return { t, locale }
 }

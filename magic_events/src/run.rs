@@ -51,9 +51,12 @@ impl Events {
     /// starts records its own, so they should agree — and spawns the relay
     /// on the current Tokio runtime.
     ///
-    /// The relay holds one connection of `pool` while it runs, for its lock;
-    /// that connection must reach one server process for as long as it
-    /// lives — a direct connection, or a pooler in session mode.
+    /// The relay holds a connection of its own while it leads, for its lock:
+    /// opened with `pool`'s options, not taken from it — one more than the
+    /// pool's `max_connections`, on which the pool's `after_connect` does not
+    /// run, so it works with the role it logs in as. It must reach one server
+    /// process for as long as it lives — a direct connection, or a pooler in
+    /// session mode; one in transaction mode is refused here.
     ///
     /// # Errors
     ///
@@ -79,6 +82,7 @@ impl Events {
             )));
         }
         stream::ensure(&jetstream, &relay.settings).await?;
+        Self::probe(&relay).await?;
         Self::record(&relay).await?;
         Ok(Self::spawn(relay, jetstream))
     }
@@ -97,6 +101,25 @@ impl Events {
             publish,
             settings,
         })
+    }
+
+    /// Refuses a database the relay's lock cannot be held on — a pooler in
+    /// transaction mode, which may hand each transaction to another server
+    /// process — by taking the lock, when no other process holds it, and
+    /// asking in a transaction whether it is held there. The lock is let go
+    /// either way: the relay takes it again as it starts.
+    async fn probe(relay: &Relay) -> Result<(), Error> {
+        let wait = relay.settings.database_timeout;
+        let Some(mut lock) = Lock::take(&relay.pool, wait).await? else {
+            return Ok(());
+        };
+        let fenced = crate::relay::bounded(wait, async {
+            lock.fenced().await?.commit().await?;
+            Ok(())
+        })
+        .await;
+        lock.release().await;
+        fenced
     }
 
     /// Records the relay's `max_body`, which `emit` holds bodies to: the

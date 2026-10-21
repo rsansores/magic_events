@@ -385,7 +385,9 @@ impl Relay {
             }
             Some(failure) => {
                 let row = &rows[published.acked];
-                let parked: bool = sqlx::query_scalar(
+                // `None`: the row was deleted since it was read — by hand,
+                // say — and there is nothing left to count against.
+                let parked: bool = sqlx::query_scalar::<_, bool>(
                     "UPDATE magic_events.outbox SET attempts = attempts + 1, last_error = $2, \
                        parked_at = CASE WHEN attempts + 1 >= $3 THEN now() END \
                      WHERE id = $1 RETURNING parked_at IS NOT NULL",
@@ -393,8 +395,9 @@ impl Relay {
                 .bind(row.id)
                 .bind(&failure.reason)
                 .bind(ATTEMPTS)
-                .fetch_one(&mut *tx)
-                .await?;
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(false);
                 if parked {
                     tracing::error!(
                         id = row.id,

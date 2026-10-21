@@ -15,8 +15,9 @@
 
 use proc_macro::TokenStream as Tokens;
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote, quote_spanned, ToTokens};
+use quote::{quote, quote_spanned, ToTokens};
 use std::collections::BTreeMap;
+use syn::ext::IdentExt;
 use syn::meta::ParseNestedMeta;
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, Attribute, Data, DeriveInput, Fields, Ident, LitInt, LitStr};
@@ -84,6 +85,24 @@ fn once<T: syn::parse::Parse>(slot: &mut Option<T>, meta: &ParseNestedMeta) -> s
     Ok(())
 }
 
+/// The identifier of the field `name` names — `type` or `r#type` both name
+/// `r#type` — or `None` when it names none.
+fn field_ident(name: &str, span: Span) -> Option<Ident> {
+    let bare = name.strip_prefix("r#").unwrap_or(name);
+    let word = !bare.is_empty()
+        && !bare.starts_with(|c: char| c.is_ascii_digit())
+        && bare.chars().all(|c| c == '_' || c.is_alphanumeric());
+    // These are never a field's name, raw or not.
+    if !word || matches!(bare, "_" | "self" | "Self" | "super" | "crate") {
+        return None;
+    }
+    match syn::parse_str::<Ident>(bare) {
+        Ok(_) => Some(Ident::new(bare, span)),
+        // A keyword: its field is written raw.
+        Err(_) => Some(Ident::new_raw(bare, span)),
+    }
+}
+
 /// One part of a subject token, or of a `ce_subject`: text as written, or a
 /// field's value.
 enum Part {
@@ -109,13 +128,14 @@ fn parts(template: &LitStr) -> syn::Result<Vec<Part>> {
                     parts.push(Part::Text(rest[..o].to_owned()));
                 }
                 let name = &rest[o + 1..c];
-                if syn::parse_str::<Ident>(name).is_err() {
+                if field_ident(name, template.span()).is_none() {
                     return Err(syn::Error::new(
                         template.span(),
                         format!("`{{{name}}}` names no field: a `{{…}}` holds a field's name"),
                     ));
                 }
-                parts.push(Part::Field(name.to_owned()));
+                let bare = name.strip_prefix("r#").unwrap_or(name);
+                parts.push(Part::Field(bare.to_owned()));
                 rest = &rest[c + 1..];
             }
             _ => {
@@ -281,11 +301,11 @@ impl One {
                 Part::Field(f) => {
                     let value = match fields {
                         Reach::Named => {
-                            let f = Ident::new(f, span);
+                            let f = field_ident(f, span).expect("checked as it was parsed");
                             quote_spanned! {span=> #f }
                         }
                         Reach::Inner => {
-                            let f = Ident::new(f, span);
+                            let f = field_ident(f, span).expect("checked as it was parsed");
                             quote_spanned! {span=> &__inner.#f }
                         }
                     };
@@ -330,7 +350,7 @@ impl One {
 /// Refuses a `{field}` that is not one of `fields`.
 fn check_named(one: &One, fields: &[Ident], of: &str) -> syn::Result<()> {
     for (name, span) in one.named() {
-        if !fields.iter().any(|f| f == name) {
+        if !fields.iter().any(|f| f.unraw() == name) {
             return Err(syn::Error::new(
                 span,
                 format!("`{{{name}}}` names no field of `{of}`"),
@@ -554,8 +574,8 @@ fn used(one: &One, fields: &[Ident]) -> Vec<Ident> {
     let named = one.named();
     fields
         .iter()
-        .filter(|f| named.iter().any(|(n, _)| f == n))
-        .map(|f| format_ident!("{}", f))
+        .filter(|f| named.iter().any(|(n, _)| f.unraw() == n))
+        .cloned()
         .collect()
 }
 

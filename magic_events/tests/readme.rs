@@ -3,8 +3,6 @@
 //! it names — and `every_rust_block_of_the_readme_is_here` holds the two to
 //! each other, so the README cannot show code that does not build.
 
-#![allow(dead_code, clippy::unused_async)]
-
 use async_nats::jetstream::Context;
 use sqlx::PgPool;
 
@@ -198,6 +196,19 @@ fn code(text: &str) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Every function above is the README's code, and only compiled: named here,
+/// none is dead.
+#[test]
+fn the_readmes_code_compiles() {
+    let _ = (
+        hero, install, migrations, settings, status, unpark, no_write,
+    );
+    #[cfg(feature = "consume")]
+    let _ = billing;
+    let _: Option<enums::Catalog> = None;
+    let _: Option<tenants::OrderPlaced> = None;
 }
 
 #[test]

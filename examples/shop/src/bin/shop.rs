@@ -60,10 +60,13 @@ async fn main() {
 
     let stores = ["north", "south"];
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // One signal for the whole run: a Ctrl-C during a step stops the next.
+    let interrupted = tokio::signal::ctrl_c();
+    tokio::pin!(interrupted);
     for n in 0_u64.. {
         tokio::select! {
             _ = tick.tick() => {}
-            _ = tokio::signal::ctrl_c() => break,
+            _ = &mut interrupted => break,
         }
         let store = stores[(n % 2) as usize];
         if let Err(e) = step(&pool, store, n).await {

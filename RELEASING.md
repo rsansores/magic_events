@@ -8,7 +8,10 @@ then:
 1. sets the version everywhere it is written and dates the changelog's
    unreleased entry (`scripts/set-version.sh`), in the working tree only, and
    packs and verifies both crates at it;
-2. runs CI on the commit released, and packs the dashboard at the version;
+2. runs CI on the commit released — the tree before the version is set;
+   the version's own change (the manifests, the lockfiles brought along, the
+   changelog's date) is verified by step 1's `cargo package`, which builds
+   each crate from its tarball — and packs the dashboard at the version;
 3. waits for a maintainer to approve the `release` environment, then
    publishes the derive, then the crate, then the dashboard;
 4. only once every registry took the release, commits `release:

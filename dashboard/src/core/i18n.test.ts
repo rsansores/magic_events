@@ -23,6 +23,11 @@ describe('translator', () => {
     expect(translator('de')('outbox.title')).toBe('Outbox')
   })
 
+  it('keeps English for what a host’s own locale does not say', () => {
+    expect(translator('fr', { fr: { 'mood.ok': 'Tout va bien' } })('outbox.title')).toBe('Outbox')
+    expect(translator('fr', { fr: { 'mood.ok': 'Tout va bien' } })('mood.ok')).toBe('Tout va bien')
+  })
+
   it('lets a host reword a built-in message and keeps the rest', () => {
     const messages = mergeMessages({ en: { 'mood.ok': 'All good' } })
     expect(translator('en', messages)('mood.ok')).toBe('All good')
