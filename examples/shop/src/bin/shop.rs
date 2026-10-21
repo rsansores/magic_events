@@ -1,13 +1,22 @@
 //! The shop: it places orders and ships them, each write with its event in
-//! the same transaction, and runs the relay. Its status is at
-//! http://localhost:3000/events/status (and `/events/recent`).
+//! the same transaction, and runs the relay. Its events page — `web/`, the
+//! dashboard over the shop's answers — is at http://127.0.0.1:3000, and the
+//! answers themselves at `/events/status` and `/events/recent`.
 
-use axum::{extract::State, routing::get, Json, Router};
-use magic_events::status::Filter;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::Html;
+use axum::routing::get;
+use axum::{Json, Router};
+use magic_events::status::{Filter, Recent, Status};
 use magic_events::{emit, Events, Settings};
 use shop::Shop;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_http::services::ServeDir;
+
+/// The events page, built by `pnpm build` in `web/`.
+const PAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/web/dist");
 
 #[tokio::main]
 async fn main() {
@@ -30,30 +39,24 @@ async fn main() {
     // The status, as the dashboard reads it. A real shop puts its own
     // authorization in front, and the filter the caller may see.
     let app = Router::new()
-        .route(
-            "/events/status",
-            get(|State(events): State<Arc<Events>>| async move {
-                Json(events.status(&Filter::all()).await.expect("the status"))
-            }),
-        )
-        .route(
-            "/events/recent",
-            get(|State(events): State<Arc<Events>>| async move {
-                Json(
-                    events
-                        .recent(&Filter::all(), 20)
-                        .await
-                        .expect("recent events"),
-                )
-            }),
-        )
-        .with_state(events.clone());
-    // `SHOP_LISTEN=0.0.0.0:3000` serves it beyond this machine.
+        .route("/events/status", get(status))
+        .route("/events/recent", get(recent))
+        .with_state(events.clone())
+        .fallback_service(ServeDir::new(PAGE).fallback(get(unbuilt)));
+    // `SHOP_LISTEN=0.0.0.0:3000` serves it beyond this machine: it has no
+    // login.
     let listen = std::env::var("SHOP_LISTEN").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .unwrap_or_else(|e| panic!("{listen}: {e}"));
-    tokio::spawn(async move { axum::serve(listener, app).await });
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
 
     let stores = ["north", "south"];
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -67,9 +70,41 @@ async fn main() {
             eprintln!("a step failed: {e}");
         }
     }
-    if let Ok(events) = Arc::try_unwrap(events) {
-        events.stop().await;
+    // The server first, which holds the relay too; then the relay, which
+    // lets its lock go for whoever runs it next.
+    let _ = stop.send(());
+    let _ = server.await;
+    match Arc::try_unwrap(events) {
+        Ok(events) => events.stop().await,
+        Err(_) => eprintln!("the relay is still held elsewhere: it stops as the process ends"),
     }
+}
+
+/// An answer of the relay's, or why there is none.
+type Answer<T> = Result<Json<T>, (StatusCode, String)>;
+
+async fn status(State(events): State<Arc<Events>>) -> Answer<Status> {
+    events
+        .status(&Filter::all())
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
+}
+
+async fn recent(State(events): State<Arc<Events>>) -> Answer<Recent> {
+    events
+        .recent(&Filter::all(), 20)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
+}
+
+async fn unbuilt() -> Html<&'static str> {
+    Html(
+        "<p>The events page is not built: run <code>pnpm install &amp;&amp; pnpm build</code> \
+         in <code>examples/shop/web</code>. The answers are at \
+         <a href=\"/events/status\">/events/status</a>.</p>",
+    )
 }
 
 /// One step of the shop: an order placed, and every third step the store's

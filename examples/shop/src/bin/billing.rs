@@ -1,6 +1,10 @@
 //! Billing: one invoice per order placed. It reads the order where the shop
 //! keeps it, and records the events it acted on, so an event delivered
 //! twice is billed once.
+//!
+//! Billing reads the shop's own table here, to keep the example to one
+//! database; a system of its own reads the order through the shop's API,
+//! with credentials of its own — the event carries only the order's id.
 
 use magic_events::consume::{consume, Delivery};
 use shop::Shop;

@@ -52,7 +52,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 /// acknowledged once the handler answers `Ok`, delivered again after a
 /// backoff when it fails (1 s, doubling, up to a minute). While a handler
 /// works, the broker is told so every 10 seconds, so a slow handler is not
-/// taken for a dead one. Runs until the broker fails it; spawn it, and abort
+/// taken for a dead one. A broker that goes away is waited for. Runs until
+/// the broker ends the consumer (deleted, say); spawn it, and abort
 /// it to stop: an event its handler had not answered is delivered again.
 ///
 /// Delivery is at least once: an event can come twice — a handler that
@@ -90,8 +91,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 /// filter, or acknowledges otherwise: it is someone else's, or this one's
 /// filter changed — delete it, or take another name, rather than read what
 /// `E` does not declare and set it aside for good. [`Error::Broker`] when
-/// the stream cannot be read, the consumer cannot be made, or the broker
-/// fails while it runs.
+/// the stream cannot be read or the consumer cannot be made as it starts,
+/// or the broker ends the consumer while it runs.
 pub async fn consume<E, H, F>(
     jetstream: &Context,
     stream: &str,
@@ -153,7 +154,15 @@ where
         .await
         .map_err(|e| broker("its messages could not be read", &e))?;
     while let Some(message) = messages.next().await {
-        let message = message.map_err(|e| broker("a message could not be read", &e))?;
+        let message = match message {
+            Ok(message) => message,
+            // The broker away, or slow: the client reconnects and the
+            // stream goes on, so the consumer waits with it.
+            Err(e) => {
+                tracing::warn!(%durable, "events: the consumer's broker failed, and is waited for: {e}");
+                continue;
+            }
+        };
         let redelivered = message
             .info()
             .map(|i| u64::try_from(i.delivered.saturating_sub(1)).unwrap_or(0))
@@ -170,18 +179,12 @@ where
             Some(Ok(event)) => event,
             Some(Err(why)) => {
                 tracing::error!(%id, subject = %message.subject, "events: an event this consumer cannot read — terminated: {why}");
-                message
-                    .ack_with(AckKind::Term)
-                    .await
-                    .map_err(|e| broker("a message could not be terminated", &e))?;
+                answer(&message, AckKind::Term, durable).await;
                 continue;
             }
             None => {
                 tracing::error!(subject = %message.subject, "events: a message with no `ce-type` — terminated");
-                message
-                    .ack_with(AckKind::Term)
-                    .await
-                    .map_err(|e| broker("a message could not be terminated", &e))?;
+                answer(&message, AckKind::Term, durable).await;
                 continue;
             }
         };
@@ -208,23 +211,26 @@ where
             }
         };
         match handled {
-            Ok(()) => message
-                .ack()
-                .await
-                .map_err(|e| broker("a message could not be acknowledged", &e))?,
+            Ok(()) => answer(&message, AckKind::Ack, durable).await,
             Err(e) => {
                 let wait = FIRST_WAIT
                     .saturating_mul(1 << redelivered.min(16))
                     .min(LONGEST_WAIT);
                 tracing::warn!(subject = %message.subject, redelivered, "events: a handler failed — delivered again in {wait:?}: {e}");
-                message
-                    .ack_with(AckKind::Nak(Some(wait)))
-                    .await
-                    .map_err(|e| broker("a message could not be refused", &e))?;
+                answer(&message, AckKind::Nak(Some(wait)), durable).await;
             }
         }
     }
     Err(broker("the broker ended its messages", &"no more"))
+}
+
+/// Tells the broker what became of `message`. An answer lost on its way —
+/// the broker away — is no error: the broker delivers the message again,
+/// and the handler meets its id again.
+async fn answer(message: &async_nats::jetstream::Message, kind: AckKind, durable: &str) {
+    if let Err(e) = message.ack_with(kind).await {
+        tracing::warn!(%durable, "events: an answer to the broker was lost — the event comes again: {e}");
+    }
 }
 
 /// A header value as the binding writes it, percent-decoded: as it was, when
