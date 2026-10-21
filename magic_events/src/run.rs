@@ -26,9 +26,10 @@ use tokio::task::JoinHandle;
 /// # }
 /// ```
 ///
-/// Dropped without [`Events::stop`], the relay stops at its next wait, as
-/// after a crash: whatever it published and did not delete yet is published
-/// again, and the stream drops it as a duplicate.
+/// Dropped without [`Events::stop`], the relay stops as `stop` stops it, in
+/// a task nobody waits for: the process may end before the pass under way
+/// does, as after a crash — whatever it published and did not delete yet is
+/// published again, and the stream drops it as a duplicate.
 pub struct Events {
     relay: Arc<Relay>,
     jetstream: async_nats::jetstream::Context,
@@ -179,10 +180,10 @@ impl Events {
         }
     }
 
-    /// Stops the relay and waits for it: a pass under way is cut short, and
-    /// its messages published again by whoever runs the relay next — the
-    /// stream drops them as duplicates. Another process standing by takes
-    /// the lock within its `standby`.
+    /// Stops the relay and waits for it: a pass under way is finished —
+    /// what it published deleted, within its own timeouts — and the lock let
+    /// go, so a process standing by takes it within its `standby`, and sends
+    /// nothing twice.
     pub async fn stop(mut self) {
         let _ = self.stop.send(true);
         if let Some(task) = self.task.take() {

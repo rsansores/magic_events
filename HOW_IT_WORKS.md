@@ -93,7 +93,10 @@ transaction once, as a probe, and refuses to start, naming the pooler, when
 the fence fails; a relay that meets it later publishes nothing and says why.
 
 At the top of every loop the leader checks its lock is still there; if not,
-it stands by again.
+it stands by again. `Events::stop` is seen between passes, never inside one:
+the pass under way finishes — what it published deleted — and the lock is
+let go at once, so a deploy sends nothing twice and the next relay waits
+for no keepalive.
 
 ### A pass
 

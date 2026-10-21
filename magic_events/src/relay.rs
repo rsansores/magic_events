@@ -167,8 +167,9 @@ pub(crate) struct Relay {
 
 impl Relay {
     /// Runs until `shutdown` resolves: stands by while another process holds
-    /// the lock, and leads while this one does. A pass `shutdown` cuts short
-    /// runs again, as after a crash.
+    /// the lock, and leads while this one does. A pass under way when it
+    /// resolves is finished — what it published deleted — and the lock let
+    /// go, so the next relay neither waits for it nor sends anything again.
     pub(crate) async fn run(&self, shutdown: impl Future<Output = ()>) {
         tokio::pin!(shutdown);
         loop {
@@ -176,9 +177,9 @@ impl Relay {
                 () = &mut shutdown => return,
                 lock = self.lock() => lock,
             };
-            tokio::select! {
-                () = &mut shutdown => return,
-                () = self.lead(lock) => {}
+            if let Some(lock) = self.lead(lock, &mut shutdown).await {
+                lock.release().await;
+                return;
             }
         }
     }
@@ -195,16 +196,25 @@ impl Relay {
         }
     }
 
-    /// The relay, for as long as this process holds `lock`.
-    async fn lead(&self, mut lock: Lock) {
+    /// The relay, for as long as this process holds `lock`: `None` once it
+    /// lost it, or the lock back when `shutdown` resolved — between passes,
+    /// never inside one.
+    async fn lead<F: Future<Output = ()>>(
+        &self,
+        mut lock: Lock,
+        shutdown: &mut std::pin::Pin<&mut F>,
+    ) -> Option<Lock> {
         tracing::info!("events: this process runs the relay");
         let (first, max) = self.settings.backoff;
         let mut backoff = first;
         let mut prune_at = tokio::time::Instant::now();
         loop {
+            if futures_util::FutureExt::now_or_never(&mut *shutdown).is_some() {
+                return Some(lock);
+            }
             if !lock.still_held().await {
                 tracing::error!("events: the relay's lock is gone, or its database does not answer — standing by");
-                return;
+                return None;
             }
             if tokio::time::Instant::now() >= prune_at {
                 if let Err(e) = self.prune(&mut lock).await {
@@ -212,12 +222,15 @@ impl Relay {
                 }
                 prune_at = tokio::time::Instant::now() + PRUNE_EVERY;
             }
-            match self.pass(&mut lock, backoff).await {
+            let wait = match self.pass(&mut lock, backoff).await {
                 Ok(0) => {
                     backoff = first;
-                    tokio::time::sleep(self.settings.idle).await;
+                    self.settings.idle
                 }
-                Ok(_) => backoff = first,
+                Ok(_) => {
+                    backoff = first;
+                    Duration::ZERO
+                }
                 Err(e) => {
                     if matches!(e, Error::Misuse(_)) {
                         tracing::error!(
@@ -226,9 +239,14 @@ impl Relay {
                     } else {
                         tracing::warn!("events: a pass failed, and runs again in {backoff:?}: {e}");
                     }
-                    tokio::time::sleep(backoff).await;
+                    let wait = backoff;
                     backoff = backoff.saturating_mul(2).min(max);
+                    wait
                 }
+            };
+            tokio::select! {
+                () = &mut *shutdown => return Some(lock),
+                () = tokio::time::sleep(wait) => {}
             }
         }
     }

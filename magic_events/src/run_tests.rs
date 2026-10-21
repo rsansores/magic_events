@@ -43,6 +43,42 @@ async fn started_it_publishes_what_commits_and_stopped_it_stops(pool: PgPool) {
     broker.done().await;
 }
 
+/// Stopped in the middle of a long outbox, the relay finishes the pass
+/// under way: whatever it published is deleted, so nothing is in the stream
+/// and in the outbox at once, to be sent twice by the relay after it.
+#[sqlx::test(migrations = false)]
+async fn stopped_mid_drain_it_leaves_nothing_to_send_twice(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for n in 0..3000 {
+        crate::emit(&mut tx, &shipped("north", n)).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    let events = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone(),
+    )
+    .await
+    .unwrap();
+    until("some published", || async {
+        !broker.messages().await.is_empty()
+    })
+    .await;
+    events.stop().await;
+    let held = i64::try_from(broker.messages().await.len()).unwrap();
+    let left = count(&pool, "SELECT count(*) FROM magic_events.outbox").await;
+    assert!(left > 0, "stopped before the end");
+    assert_eq!(
+        held + left,
+        3000,
+        "{held} in the stream, {left} in the outbox"
+    );
+    assert_eq!(count(&pool, HELD).await, 0, "the lock let go");
+    broker.done().await;
+}
+
 /// Two processes on one database: one leads and the other stands by, and
 /// every event is published once.
 #[sqlx::test(migrations = false)]
