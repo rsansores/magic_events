@@ -8,6 +8,9 @@ use crate::tests::{count, emit_each, idle, shipped, until, Broker, Faulty, Mode}
 use crate::Events;
 use sqlx::PgPool;
 
+/// How long a test's relay waits for the database.
+const WAIT: Duration = Duration::from_secs(30);
+
 /// Passes until the outbox has nothing left to publish.
 async fn drain(events: &Events) {
     while events.pass_now().await.unwrap().expect("the lock") > 0 {}
@@ -218,9 +221,9 @@ async fn a_message_published_and_not_deleted_is_held_once(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1), shipped("north", 2)]).await;
-    let mut lock = Lock::take(&pool).await.unwrap().unwrap();
-    let rows = events_relay(&events).pending(&mut lock).await.unwrap();
-    let published = events_relay(&events).send(&rows).await;
+    let mut lock = Lock::take(&pool, WAIT).await.unwrap().unwrap();
+    let mut rows = events_relay(&events).pending(&mut lock).await.unwrap();
+    let published = events_relay(&events).send(&mut rows).await;
     assert_eq!((published.acked, published.failure), (2, None));
     lock.release().await;
     assert_eq!(
@@ -353,9 +356,9 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1)]).await;
     let relay = events_relay(&events);
-    let mut lock = Lock::take(&pool).await.unwrap().unwrap();
-    let rows = relay.pending(&mut lock).await.unwrap();
-    let published = relay.send(&rows).await;
+    let mut lock = Lock::take(&pool, WAIT).await.unwrap().unwrap();
+    let mut rows = relay.pending(&mut lock).await.unwrap();
+    let published = relay.send(&mut rows).await;
     sqlx::query(
         "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' \
             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
@@ -387,9 +390,10 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn a_transaction_on_a_connection_without_the_lock_is_refused(pool: PgPool) {
     Events::install(&pool).await.unwrap();
-    let held = Lock::take(&pool).await.unwrap().unwrap();
+    let held = Lock::take(&pool, WAIT).await.unwrap().unwrap();
     let mut elsewhere = Lock {
         conn: pool.acquire().await.unwrap().detach(),
+        wait: WAIT,
     };
     match elsewhere.fenced().await.err() {
         Some(crate::Error::Misuse(why)) => assert!(why.contains("session pooling"), "{why}"),
@@ -402,4 +406,42 @@ async fn a_transaction_on_a_connection_without_the_lock_is_refused(pool: PgPool)
 /// The relay inside `events`, for a test that runs its steps one by one.
 fn events_relay(events: &Events) -> &Relay {
     events.relay()
+}
+
+/// A relay whose database stops answering — here, a table lock it waits
+/// behind — gives up within its wait, and its session lets the lock go, so
+/// another process can take over; and its session is set to be ended by the
+/// server when its network dies.
+#[sqlx::test(migrations = false)]
+async fn a_relay_the_database_does_not_answer_lets_its_lock_go(pool: PgPool) {
+    let broker = Broker::new().await;
+    let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    let wait = Duration::from_millis(500);
+    let mut lock = Lock::take(&pool, wait).await.unwrap().unwrap();
+    let user_timeout: String = sqlx::query_scalar("SHOW tcp_user_timeout")
+        .fetch_one(&mut lock.conn)
+        .await
+        .unwrap();
+    assert_eq!(user_timeout, "20000");
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE magic_events.outbox IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert!(events_relay(&events).pending(&mut lock).await.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(lock);
+    until("another takes the lock", || async {
+        Lock::take(&pool, wait).await.ok().flatten().is_some()
+    })
+    .await;
+    blocker.rollback().await.unwrap();
+    broker.done().await;
 }

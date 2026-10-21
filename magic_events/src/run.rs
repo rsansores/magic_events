@@ -47,7 +47,8 @@ impl std::fmt::Debug for Events {
 impl Events {
     /// Starts the relay: checks the settings and the database's schema,
     /// creates or checks the stream ([`Settings::manage_stream`]), records
-    /// [`Settings::max_body`] for [`emit`](crate::emit), and spawns the relay
+    /// [`Settings::max_body`] for [`emit`](crate::emit) — every process that
+    /// starts records its own, so they should agree — and spawns the relay
     /// on the current Tokio runtime.
     ///
     /// The relay holds one connection of `pool` while it runs, for its lock;
@@ -67,40 +68,45 @@ impl Events {
         jetstream: async_nats::jetstream::Context,
         settings: Settings,
     ) -> Result<Self, Error> {
-        settings.check()?;
+        let relay = Self::prepare(pool, Arc::new(jetstream.clone()), settings).await?;
         let max_payload = jetstream.client().server_info().max_payload;
-        let needed = u64::from(settings.max_body) + u64::from(HEADROOM);
+        let needed = u64::from(relay.settings.max_body) + u64::from(HEADROOM);
         if max_payload > 0 && u64::try_from(max_payload).unwrap_or(u64::MAX) < needed {
             return Err(Error::Misuse(format!(
                 "the broker takes messages of {max_payload} bytes at most (`max_payload`), and a \
                  body of `max_body` {} bytes needs {needed} with its headers",
-                settings.max_body
+                relay.settings.max_body
             )));
         }
-        let relay = Self::prepare(pool, Arc::new(jetstream.clone()), settings).await?;
         stream::ensure(&jetstream, &relay.settings).await?;
+        Self::record(&relay).await?;
         Ok(Self::spawn(relay, jetstream))
     }
 
-    /// The relay, checked and with its `max_body` recorded, not running yet.
+    /// The relay, its settings and the database's schema checked, not
+    /// running yet.
     pub(crate) async fn prepare(
         pool: PgPool,
         publish: Arc<dyn Publish>,
         settings: Settings,
     ) -> Result<Relay, Error> {
         settings.check()?;
-        let mut conn = pool.acquire().await?;
-        schema::check(&mut conn).await?;
-        sqlx::query("UPDATE magic_events.relay SET max_body = $1 WHERE id = 1")
-            .bind(i32::try_from(settings.max_body).unwrap_or(i32::MAX))
-            .execute(&mut *conn)
-            .await?;
-        drop(conn);
+        schema::check(&mut *pool.acquire().await?).await?;
         Ok(Relay {
             pool,
             publish,
             settings,
         })
+    }
+
+    /// Records the relay's `max_body`, which `emit` holds bodies to: the
+    /// last process to start says it for all of them.
+    pub(crate) async fn record(relay: &Relay) -> Result<(), Error> {
+        sqlx::query("UPDATE magic_events.relay SET max_body = $1 WHERE id = 1")
+            .bind(i32::try_from(relay.settings.max_body).unwrap_or(i32::MAX))
+            .execute(&relay.pool)
+            .await?;
+        Ok(())
     }
 
     /// `relay`, running in a task of its own.
@@ -196,7 +202,9 @@ impl Events {
     /// What stopped the pass: [`Error::Broker`] when the broker failed it,
     /// [`Error::Database`] when the database did.
     pub async fn pass_now(&self) -> Result<Option<usize>, Error> {
-        let Some(mut lock) = Lock::take(&self.relay.pool).await? else {
+        let Some(mut lock) =
+            Lock::take(&self.relay.pool, self.relay.settings.database_timeout).await?
+        else {
             return Ok(None);
         };
         let done = self

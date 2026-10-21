@@ -35,6 +35,12 @@ pub(crate) const LOCK_KEY: i64 = 0x4556_4e54_524c_4159;
 /// Times the broker refuses a message before it is parked.
 pub(crate) const ATTEMPTS: i32 = 3;
 
+/// Days of published counts kept; the status reads the last 30.
+const PUBLISHED_KEPT_DAYS: i32 = 90;
+
+/// How often the leader forgets the published counts past those days.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+
 /// Whether the server process the statement runs on holds the advisory lock
 /// `$1`: a connection through a pooler in transaction mode may run each
 /// transaction on another, which does not.
@@ -42,23 +48,65 @@ const HELD_HERE: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 
        AND pid = pg_backend_pid() AND granted AND objsubid = 1 \
        AND classid = ($1::bigint >> 32)::oid AND objid = ($1::bigint & 4294967295)::oid)";
 
+/// How the server ends the lock's session — and lets the lock go — when the
+/// relay is gone, rather than keep it for the hours its defaults take to
+/// notice: keepalive probes after 10 s of silence, every 5 s, three missed;
+/// anything sent unacknowledged for 20 s (both ignored over a Unix socket);
+/// a statement that runs past the relay's own wait (`$1`, in ms) cancelled;
+/// and, while one runs, the client looked for every 5 s.
+const SESSION: &str = "SELECT set_config('tcp_keepalives_idle', '10', false), \
+       set_config('tcp_keepalives_interval', '5', false), \
+       set_config('tcp_keepalives_count', '3', false), \
+       set_config('tcp_user_timeout', '20000', false), \
+       set_config('statement_timeout', $1, false), \
+       set_config('client_connection_check_interval', '5000', false)";
+
+/// The error of a statement the database did not answer within `wait`.
+fn unanswered(wait: Duration) -> Error {
+    Error::Database(sqlx::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("the database did not answer within {wait:?}"),
+    )))
+}
+
+/// `work`, or an error once `wait` passed without its answer.
+pub(crate) async fn bounded<T>(
+    wait: Duration,
+    work: impl Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    tokio::time::timeout(wait, work)
+        .await
+        .unwrap_or_else(|_| Err(unanswered(wait)))
+}
+
 /// Proof that this process runs the relay: a connection holding the
 /// advisory lock. Drop it, or lose the connection, and the lock is free.
 pub(crate) struct Lock {
     pub(crate) conn: PgConnection,
+    /// How long a statement of the relay's may take before the relay counts
+    /// the database as away.
+    pub(crate) wait: Duration,
 }
 
 impl Lock {
-    pub(crate) async fn take(pool: &PgPool) -> Result<Option<Lock>, Error> {
-        // Detached before it asks: dropped mid-question, the connection
-        // closes and lets go of a lock it may have got, rather than going
-        // back to the pool holding it.
-        let mut conn = pool.acquire().await?.detach();
-        let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-            .bind(LOCK_KEY)
-            .fetch_one(&mut conn)
-            .await?;
-        Ok(taken.then_some(Lock { conn }))
+    /// The lock, on a connection of its own — opened with `pool`'s options,
+    /// not taken from it: it lives as long as the lock, and closes, letting go
+    /// of the lock, when it is dropped — or `None` when another session holds
+    /// it.
+    pub(crate) async fn take(pool: &PgPool, wait: Duration) -> Result<Option<Lock>, Error> {
+        bounded(wait, async {
+            let mut conn = PgConnection::connect_with(&pool.connect_options()).await?;
+            sqlx::query(SESSION)
+                .bind(wait.as_millis().to_string())
+                .execute(&mut conn)
+                .await?;
+            let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(LOCK_KEY)
+                .fetch_one(&mut conn)
+                .await?;
+            Ok(taken.then_some(Lock { conn, wait }))
+        })
+        .await
     }
 
     /// Lets the lock go now, rather than when the connection's end reaches
@@ -70,13 +118,14 @@ impl Lock {
             .await;
     }
 
-    /// A connection that still answers still holds its session's lock.
+    /// A connection that still answers, in time, still holds its session's
+    /// lock.
     pub(crate) async fn still_held(&mut self) -> bool {
-        sqlx::query_scalar::<_, bool>(HELD_HERE)
+        let wait = self.wait;
+        let held = sqlx::query_scalar::<_, bool>(HELD_HERE)
             .bind(LOCK_KEY)
-            .fetch_one(&mut self.conn)
-            .await
-            .unwrap_or(false)
+            .fetch_one(&mut self.conn);
+        matches!(tokio::time::timeout(wait, held).await, Ok(Ok(true)))
     }
 
     /// A transaction on the lock's own connection: it commits only while this
@@ -137,7 +186,7 @@ impl Relay {
     /// The lock, once this process gets it.
     async fn lock(&self) -> Lock {
         loop {
-            match Lock::take(&self.pool).await {
+            match Lock::take(&self.pool, self.settings.database_timeout).await {
                 Ok(Some(lock)) => return lock,
                 Ok(None) => tracing::debug!("events: another process runs the relay — standing by"),
                 Err(e) => tracing::warn!("events: the relay's lock could not be asked for: {e}"),
@@ -151,10 +200,17 @@ impl Relay {
         tracing::info!("events: this process runs the relay");
         let (first, max) = self.settings.backoff;
         let mut backoff = first;
+        let mut prune_at = tokio::time::Instant::now();
         loop {
             if !lock.still_held().await {
-                tracing::error!("events: the relay's lock is gone — standing by");
+                tracing::error!("events: the relay's lock is gone, or its database does not answer — standing by");
                 return;
+            }
+            if tokio::time::Instant::now() >= prune_at {
+                if let Err(e) = self.prune(&mut lock).await {
+                    tracing::warn!("events: pruning the published counts failed: {e}");
+                }
+                prune_at = tokio::time::Instant::now() + PRUNE_EVERY;
             }
             match self.pass(&mut lock, backoff).await {
                 Ok(0) => {
@@ -163,7 +219,13 @@ impl Relay {
                 }
                 Ok(_) => backoff = first,
                 Err(e) => {
-                    tracing::warn!("events: a pass failed, and runs again in {backoff:?}: {e}");
+                    if matches!(e, Error::Misuse(_)) {
+                        tracing::error!(
+                            "events: a pass failed, and runs again in {backoff:?}: {e}"
+                        );
+                    } else {
+                        tracing::warn!("events: a pass failed, and runs again in {backoff:?}: {e}");
+                    }
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2).min(max);
                 }
@@ -171,36 +233,55 @@ impl Relay {
         }
     }
 
+    /// Forgets the published counts older than `PUBLISHED_KEPT_DAYS`.
+    async fn prune(&self, lock: &mut Lock) -> Result<(), Error> {
+        bounded(lock.wait, async {
+            sqlx::query(
+                "DELETE FROM magic_events.published \
+                  WHERE day < (now() AT TIME ZONE 'UTC')::date - $1",
+            )
+            .bind(PUBLISHED_KEPT_DAYS)
+            .execute(&mut lock.conn)
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// One pass, as the relay holding `lock`: answers how many rows it
     /// published or parked. `backoff` is how long the relay waits if the
     /// broker fails it, which the status shows.
     pub(crate) async fn pass(&self, lock: &mut Lock, backoff: Duration) -> Result<usize, Error> {
-        let rows = self.pending(lock).await?;
+        let mut rows = self.pending(lock).await?;
         if rows.is_empty() {
             return Ok(0);
         }
-        let published = self.send(&rows).await;
+        let published = self.send(&mut rows).await;
         self.settle(lock, &rows, published, backoff).await
     }
 
     /// The next batch of rows to publish, in order.
     pub(crate) async fn pending(&self, lock: &mut Lock) -> Result<Vec<Pending>, Error> {
-        let mut tx = lock.fenced().await?;
-        let rows = sqlx::query_as::<_, Pending>(
-            "SELECT id, event_id, subject, type, headers, body, emitted_at \
-               FROM magic_events.outbox WHERE parked_at IS NULL ORDER BY id LIMIT $1",
-        )
-        .bind(i64::from(self.settings.batch))
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(rows)
+        bounded(lock.wait, async {
+            let mut tx = lock.fenced().await?;
+            let rows = sqlx::query_as::<_, Pending>(
+                "SELECT id, event_id, subject, type, headers, body, emitted_at \
+                   FROM magic_events.outbox WHERE parked_at IS NULL ORDER BY id LIMIT $1",
+            )
+            .bind(i64::from(self.settings.batch))
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok(rows)
+        })
+        .await
     }
 
     /// Publishes `rows` in order, up to `in_flight` of them sent and not
     /// acknowledged at once, each within `send_timeout`; stops sending at the
-    /// first failure, and still awaits what was sent before it.
-    pub(crate) async fn send(&self, rows: &[Pending]) -> Published {
+    /// first failure, and still awaits what was sent before it. Each row's
+    /// body goes with its message, and is gone from the row after.
+    pub(crate) async fn send(&self, rows: &mut [Pending]) -> Published {
         let in_flight = usize::try_from(self.settings.in_flight).unwrap_or(usize::MAX);
         let timeout = self.settings.send_timeout;
         let late = || Failure::transient(format!("no acknowledgement within {timeout:?}"));
@@ -209,12 +290,12 @@ impl Relay {
         let mut next = 0;
         loop {
             while published.failure.is_none() && next < rows.len() && waiting.len() < in_flight {
-                let row = &rows[next];
+                let row = &mut rows[next];
                 let message = row.message(&self.settings.subject_prefix, &self.settings.source);
-                let sent =
-                    tokio::time::timeout(timeout, self.publish.send(message, row.body.clone()))
-                        .await
-                        .unwrap_or_else(|_| Err(late()));
+                let body = std::mem::take(&mut row.body);
+                let sent = tokio::time::timeout(timeout, self.publish.send(message, body))
+                    .await
+                    .unwrap_or_else(|_| Err(late()));
                 match sent {
                     Ok(ack) => waiting.push_back((next, ack)),
                     Err(failure) => published.failure = Some(failure),
@@ -243,6 +324,18 @@ impl Relay {
     /// stopped the batch — the relay's, or the row's. Answers how many rows
     /// left the queue, or the transient failure as an error.
     pub(crate) async fn settle(
+        &self,
+        lock: &mut Lock,
+        rows: &[Pending],
+        published: Published,
+        backoff: Duration,
+    ) -> Result<usize, Error> {
+        let wait = lock.wait;
+        bounded(wait, self.record(lock, rows, published, backoff)).await
+    }
+
+    /// `settle`, with no bound on how long the database takes.
+    async fn record(
         &self,
         lock: &mut Lock,
         rows: &[Pending],

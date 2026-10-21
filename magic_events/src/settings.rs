@@ -53,6 +53,9 @@ pub struct Settings {
     pub(crate) backoff: (Duration, Duration),
     pub(crate) standby: Duration,
     pub(crate) max_body: u32,
+    /// How long a statement of the relay's may take before the relay counts
+    /// the database as away, lets go of its lock and stands by.
+    pub(crate) database_timeout: Duration,
 }
 
 impl Settings {
@@ -80,6 +83,7 @@ impl Settings {
             backoff: (Duration::from_millis(500), Duration::from_secs(60)),
             standby: Duration::from_secs(30),
             max_body: MAX_BODY,
+            database_timeout: Duration::from_secs(30),
         }
     }
 

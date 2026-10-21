@@ -194,12 +194,11 @@ pub(crate) async fn idle(pool: &PgPool, broker: &Broker, publish: Arc<dyn Publis
     crate::stream::ensure(&broker.jetstream, &broker.settings)
         .await
         .unwrap();
-    Events::idle(
-        Events::prepare(pool.clone(), publish, broker.settings.clone())
-            .await
-            .unwrap(),
-        broker.jetstream.clone(),
-    )
+    let relay = Events::prepare(pool.clone(), publish, broker.settings.clone())
+        .await
+        .unwrap();
+    Events::record(&relay).await.unwrap();
+    Events::idle(relay, broker.jetstream.clone())
 }
 
 /// Emits each of `events` in a transaction of its own.
