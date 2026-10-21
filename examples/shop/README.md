@@ -29,6 +29,8 @@ Stop billing for a while and start it again: it takes up where it stopped.
 Stop NATS (`docker compose stop nats`): the shop keeps taking orders, its
 outbox grows, and once NATS is back every event goes out, once.
 
-`DATABASE_URL` and `NATS_URL` point the programs elsewhere. The example
+`DATABASE_URL` and `NATS_URL` point the programs elsewhere, and
+`SHOP_LISTEN` (`127.0.0.1:3000` by default) is where the shop serves its
+status: `0.0.0.0:3000` serves it beyond this machine. The example
 reaches the crate in this repository by path; a copy outside it leaves
 `path` out of `Cargo.toml`.

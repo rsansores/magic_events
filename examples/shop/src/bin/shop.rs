@@ -48,9 +48,11 @@ async fn main() {
             }),
         )
         .with_state(events.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    // `SHOP_LISTEN=0.0.0.0:3000` serves it beyond this machine.
+    let listen = std::env::var("SHOP_LISTEN").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+    let listener = tokio::net::TcpListener::bind(&listen)
         .await
-        .expect("port 3000");
+        .unwrap_or_else(|e| panic!("{listen}: {e}"));
     tokio::spawn(async move { axum::serve(listener, app).await });
 
     let stores = ["north", "south"];
