@@ -39,17 +39,27 @@ const FIRST_WAIT: Duration = Duration::from_secs(1);
 /// The longest wait before an event a handler failed on is delivered again.
 const LONGEST_WAIT: Duration = Duration::from_secs(60);
 
+/// How long the broker waits for an acknowledgement before it delivers an
+/// event again: a handler still at work says so every [`PROGRESS_EVERY`].
+const ACK_WAIT: Duration = Duration::from_secs(30);
+
+/// How often a handler still at work tells the broker it is.
+const PROGRESS_EVERY: Duration = Duration::from_secs(10);
+
 /// Reads the events of `stream` under `filter` through the durable consumer
 /// `durable` — created if it is not there, resumed where it stopped if it is
-/// — and hands each to `handler`, in order: acknowledged once the handler
-/// answers `Ok`, delivered again after a backoff when it fails (1 s,
-/// doubling, up to a minute). Runs until the broker fails it; spawn it, and
-/// abort it to stop: an event its handler had not answered is delivered
-/// again.
+/// — and hands each to `handler`, one at a time, in the stream's order:
+/// acknowledged once the handler answers `Ok`, delivered again after a
+/// backoff when it fails (1 s, doubling, up to a minute). While a handler
+/// works, the broker is told so every 10 seconds, so a slow handler is not
+/// taken for a dead one. Runs until the broker fails it; spawn it, and abort
+/// it to stop: an event its handler had not answered is delivered again.
 ///
 /// Delivery is at least once: an event can come twice — a handler that
 /// failed, a consumer stopped before its acknowledgement — and always with
-/// the same `id`, which a handler that must not act twice records.
+/// the same `id`, which a handler that must not act twice records. An event
+/// a handler failed on is delivered again after the backoff, so the events
+/// behind it go first: order holds only while handlers succeed.
 ///
 /// An event `E` cannot read — a type it does not declare, a body that does
 /// not decode — is logged and terminated: it is never delivered to this
@@ -76,8 +86,11 @@ const LONGEST_WAIT: Duration = Duration::from_secs(60);
 ///
 /// # Errors
 ///
-/// [`Error::Broker`] when the stream cannot be read, the consumer cannot be
-/// made (a durable of that name with another filter, say), or the broker
+/// [`Error::Misuse`] when a durable of that name exists and reads another
+/// filter, or acknowledges otherwise: it is someone else's, or this one's
+/// filter changed — delete it, or take another name, rather than read what
+/// `E` does not declare and set it aside for good. [`Error::Broker`] when
+/// the stream cannot be read, the consumer cannot be made, or the broker
 /// fails while it runs.
 pub async fn consume<E, H, F>(
     jetstream: &Context,
@@ -95,7 +108,7 @@ where
         reason: format!("the consumer `{durable}` of `{stream}`: {what}: {e}"),
         transient: true,
     };
-    let consumer = jetstream
+    let mut consumer = jetstream
         .get_stream(stream)
         .await
         .map_err(|e| broker("the stream could not be read", &e))?
@@ -105,12 +118,37 @@ where
                 durable_name: Some(durable.to_owned()),
                 filter_subject: filter.to_owned(),
                 ack_policy: AckPolicy::Explicit,
+                ack_wait: ACK_WAIT,
                 ..Default::default()
             },
         )
         .await
         .map_err(|e| broker("it could not be made", &e))?;
+    // A durable that was there already is taken as it is: one that reads
+    // something else would have every event it holds terminated as one `E`
+    // cannot read.
+    let found = &consumer
+        .info()
+        .await
+        .map_err(|e| broker("it could not be read", &e))?
+        .config;
+    let filters: Vec<&str> = std::iter::once(found.filter_subject.as_str())
+        .filter(|f| !f.is_empty())
+        .chain(found.filter_subjects.iter().map(String::as_str))
+        .collect();
+    if filters != [filter] || found.ack_policy != AckPolicy::Explicit {
+        return Err(Error::Misuse(format!(
+            "the consumer `{durable}` of `{stream}` reads {filters:?} acknowledging {:?}, not \
+             `{filter}` acknowledging each: it is another's, or its filter changed — delete it \
+             (`nats consumer rm {stream} {durable}`) or take another name",
+            found.ack_policy
+        )));
+    }
+    // One at a time: a message waiting in a batch would count against its
+    // acknowledgement's wait while the ones before it are handled.
     let mut messages = consumer
+        .stream()
+        .max_messages_per_batch(1)
         .messages()
         .await
         .map_err(|e| broker("its messages could not be read", &e))?;
@@ -156,7 +194,20 @@ where
                 .map(|t| t.with_timezone(&Utc)),
             redelivered,
         };
-        match handler(delivery).await {
+        let handled = handler(delivery);
+        tokio::pin!(handled);
+        let mut progress =
+            tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS_EVERY, PROGRESS_EVERY);
+        let handled = loop {
+            tokio::select! {
+                handled = &mut handled => break handled,
+                _ = progress.tick() => {
+                    // Still at work: the broker waits another `ACK_WAIT`.
+                    let _ = message.ack_with(AckKind::Progress).await;
+                }
+            }
+        };
+        match handled {
             Ok(()) => message
                 .ack()
                 .await

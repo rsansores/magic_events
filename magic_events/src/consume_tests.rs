@@ -243,3 +243,24 @@ async fn a_durable_consumer_resumes_where_it_stopped(pool: PgPool) {
     assert_eq!(got.iter().map(|g| g.0.clone()).collect::<Vec<_>>(), later);
     broker.done().await;
 }
+
+/// A durable consumer that reads another filter is refused, not read: its
+/// events are not `E`'s, and each would be set aside for good.
+#[sqlx::test(migrations = false)]
+async fn a_durable_of_that_name_reading_another_filter_is_refused(pool: PgPool) {
+    let broker = Broker::new().await;
+    let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
+    let prefix = broker.settings.subject_prefix.clone();
+    publish(&pool, &events, &[placed(1)]).await;
+    let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
+    until("the first", || async { got.lock().unwrap().len() == 1 }).await;
+    task.abort();
+    let _ = task.await;
+
+    let (task, _) = consuming(&broker, "billing", format!("{prefix}.catalog.>"), false);
+    match task.await.unwrap() {
+        Err(Error::Misuse(why)) => assert!(why.contains("its filter changed"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    broker.done().await;
+}
