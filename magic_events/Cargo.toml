@@ -1,0 +1,24 @@
+[package]
+name = "magic_events"
+description = "Events that leave PostgreSQL only if the transaction that raised them committed, and always leave if it did: a transactional outbox relayed to NATS JetStream as CloudEvents"
+keywords = ["events", "outbox", "postgres", "nats", "cloudevents"]
+categories = ["database", "asynchronous"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/magic_events"
+
+[dependencies]
+async-nats = { version = "0.50", default-features = false, features = ["jetstream", "ring", "server_2_10"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
+thiserror = "2"
+
+[dev-dependencies]
+# `#[sqlx::test]`, which builds a database of its own for each test.
+sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v7"] }

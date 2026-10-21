@@ -1,0 +1,17 @@
+# The actions are pinned to commits, and the lockfiles to versions; this moves
+# both to the releases.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: cargo
+    directories:
+      - /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

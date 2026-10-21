@@ -1,0 +1,16 @@
+[package]
+name = "magic_events_derive"
+description = "#[derive(Event)] for magic_events: one type is one event, and says its type, version and subject"
+keywords = ["events", "outbox", "derive"]
+categories = ["database", "development-tools::procedural-macro-helpers"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/magic_events"
+
+[lib]
+proc-macro = true

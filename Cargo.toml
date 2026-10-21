@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["magic_events", "magic_events_derive"]
+# The shop example is a workspace of its own.
+exclude = ["examples"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# async-nats, whose JetStream context a host hands the relay, needs 1.88.
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rsansores/magic_events"
+authors = ["Ricardo Sansores <ricardo@ssf.mx>"]

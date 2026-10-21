@@ -1,0 +1,39 @@
+# What `cargo deny check` holds the dependencies to: the crate's, and those of
+# the example, a workspace of its own.
+
+[graph]
+all-features = true
+
+[advisories]
+# A vulnerability fails, and so does an unmaintained crate anywhere in the
+# graph (by default only a direct dependency is looked at); a yanked version too.
+yanked = "deny"
+unmaintained = "all"
+
+[licenses]
+# The example (publish = false) carries no license of its own.
+private = { ignore = true }
+# What a crate licensed MIT OR Apache-2.0 may depend on. ISC is the TLS
+# stack's (ring, rustls-webpki), which the NATS client connects through.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# The path dependency on the derive carries a version too.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
