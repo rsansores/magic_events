@@ -283,12 +283,12 @@ pub async fn magic_events::Events::pass_now(&self) -> core::result::Result<core:
 pub async fn magic_events::Events::recent(&self, &magic_events::status::Filter, u32) -> core::result::Result<magic_events::status::Recent, magic_events::Error>
 pub async fn magic_events::Events::start(sqlx_postgres::PgPool, async_nats::jetstream::context::Context, magic_events::Settings) -> core::result::Result<Self, magic_events::Error>
 pub async fn magic_events::Events::status(&self, &magic_events::status::Filter) -> core::result::Result<magic_events::status::Status, magic_events::Error>
-pub async fn magic_events::Events::stop(self)
+pub async fn magic_events::Events::stop(&self)
 pub async fn magic_events::Events::unpark(&self, i64) -> core::result::Result<bool, magic_events::Error>
 pub async fn magic_events::Events::unpark_all(&self) -> core::result::Result<u64, magic_events::Error>
 impl core::fmt::Debug for magic_events::Events
 pub fn magic_events::Events::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for magic_events::Events
+impl !core::marker::Freeze for magic_events::Events
 impl core::marker::Send for magic_events::Events
 impl core::marker::Sync for magic_events::Events
 impl core::marker::Unpin for magic_events::Events

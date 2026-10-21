@@ -34,7 +34,9 @@ pub struct Events {
     relay: Arc<Relay>,
     jetstream: async_nats::jetstream::Context,
     stop: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    /// The relay's task, until it is stopped: behind a lock so `stop` takes
+    /// `&self`, and a host that shares its `Events` can still stop it.
+    task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for Events {
@@ -155,7 +157,7 @@ impl Events {
             relay,
             jetstream,
             stop,
-            task: Some(task),
+            task: std::sync::Mutex::new(Some(task)),
         }
     }
 
@@ -166,7 +168,7 @@ impl Events {
             relay: Arc::new(relay),
             jetstream,
             stop: watch::channel(false).0,
-            task: None,
+            task: std::sync::Mutex::new(None),
         }
     }
 
@@ -178,19 +180,30 @@ impl Events {
 
     /// Stops the relay at once, wherever it is, as a crash would.
     #[cfg(test)]
-    pub(crate) fn abort(mut self) {
-        if let Some(task) = self.task.take() {
+    pub(crate) fn abort(self) {
+        if let Some(task) = self.task() {
             task.abort();
         }
+    }
+
+    /// The relay's task, taken: `None` once stopped, or never started.
+    fn task(&self) -> Option<JoinHandle<()>> {
+        self.task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Stops the relay and waits for it: a pass under way is finished —
     /// what it published deleted, within its own timeouts — and the lock let
     /// go, so a process standing by takes it within its `standby`, and sends
-    /// nothing twice.
-    pub async fn stop(mut self) {
+    /// nothing twice. It takes `&self`, so an `Events` shared with request
+    /// handlers — behind an `Arc`, for [`Events::status`] — is stopped where
+    /// the host shuts down; stopping it again, or from two places, waits for
+    /// nothing more.
+    pub async fn stop(&self) {
         let _ = self.stop.send(true);
-        if let Some(task) = self.task.take() {
+        if let Some(task) = self.task() {
             let _ = task.await;
         }
     }

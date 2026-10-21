@@ -449,3 +449,38 @@ async fn a_role_without_the_grants_is_refused_at_start(pool: PgPool) {
     drop_role(&pool, &bare).await;
     broker.done().await;
 }
+
+/// An `Events` shared with others — request handlers asking its status — is
+/// stopped through a reference: the lock let go, and a second stop waits for
+/// nothing.
+#[sqlx::test(migrations = false)]
+async fn a_shared_events_is_stopped_through_a_reference(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    let events = std::sync::Arc::new(
+        Events::start(
+            pool.clone(),
+            broker.jetstream.clone(),
+            broker.settings.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    let handlers = events.clone();
+    until("leading", || async { count(&pool, HELD).await == 1 }).await;
+    events.stop().await;
+    assert_eq!(count(&pool, HELD).await, 0, "the lock let go");
+    tokio::time::timeout(Duration::from_secs(1), handlers.stop())
+        .await
+        .expect("stopped already");
+    assert_eq!(
+        handlers
+            .status(&Filter::all())
+            .await
+            .unwrap()
+            .outbox
+            .pending,
+        0
+    );
+    broker.done().await;
+}

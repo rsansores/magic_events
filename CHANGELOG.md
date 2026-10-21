@@ -11,6 +11,11 @@ Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.
   under row security say: the relay's grants go to that role alone, and the
   host's pool stays the one pool. `emit` runs as the caller's transaction
   does, and `Events::install` as the login role. API: one method added.
+- **`Events::stop` takes `&self`**, so an `Events` shared behind an `Arc` —
+  with request handlers serving `Events::status`, say — is stopped where the
+  host shuts down. A call written `events.stop().await` compiles as before.
+- A test stopped the relay mid-drain only on a slow enough machine; it now
+  does on any.
 
 ## 0.1.0 — 2026-10-21
 
