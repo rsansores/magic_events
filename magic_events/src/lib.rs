@@ -24,11 +24,16 @@
 mod emit;
 mod envelope;
 mod error;
+mod publish;
+mod relay;
+mod run;
 mod schema;
 mod settings;
+mod stream;
 
 pub use emit::emit;
 pub use error::Error;
+pub use run::Events;
 pub use schema::migration;
 pub use settings::{Settings, Storage};
 
@@ -92,41 +97,6 @@ pub trait Event: serde::Serialize + __private::Sealed {
 /// refused by [`emit`].
 pub use magic_events_derive::Event;
 
-/// The relay: started once per process, it publishes what committed. Only
-/// one process at a time publishes; the others stand by.
-#[derive(Debug)]
-pub struct Events {
-    _private: (),
-}
-
-impl Events {
-    /// Brings the database's schema `magic_events` to this build's version,
-    /// for a host with no migrations of its own: in one transaction, and one
-    /// process at a time, every step the database lacks ([`migration`]).
-    /// Installing again is harmless.
-    ///
-    /// The tables are the host's to grant: a role that emits needs `USAGE`
-    /// on the schema, `INSERT` on `magic_events.outbox`, `USAGE` on its
-    /// sequence (`magic_events.outbox_id_seq`) and `SELECT` on
-    /// `magic_events.relay`; the relay's role needs `SELECT`, `UPDATE` and
-    /// `DELETE` on the outbox, `SELECT` and `UPDATE` on `magic_events.relay`,
-    /// `SELECT`, `INSERT` and `UPDATE` on `magic_events.published`, and
-    /// `SELECT` on `magic_events.version`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Misuse`] when the schema is at a later version than this
-    /// build's, or a schema of that name is not the crate's;
-    /// [`Error::Database`] when the database fails. Whatever fails, nothing
-    /// is installed.
-    pub async fn install(pool: &sqlx::PgPool) -> Result<(), Error> {
-        let mut tx = pool.begin().await?;
-        schema::install(&mut tx).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-}
-
 // The derive's generated code names this crate.
 extern crate self as magic_events;
 
@@ -162,3 +132,6 @@ pub mod __private {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod walk_tests;

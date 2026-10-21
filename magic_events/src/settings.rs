@@ -8,7 +8,6 @@ pub(crate) const MAX_BODY: u32 = 64 << 10;
 
 /// Room a message keeps beside its body for its subject and headers: the
 /// broker's `max_payload` counts both.
-#[allow(dead_code)] // The relay holds it to the broker's.
 pub(crate) const HEADROOM: u32 = 4 << 10;
 
 /// The longest subject token, `ce-subject` or event type `emit` takes, in
@@ -38,7 +37,6 @@ pub enum Storage {
 ///     .replicas(3);
 /// ```
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // The relay reads them.
 pub struct Settings {
     pub(crate) stream: String,
     pub(crate) source: String,
@@ -192,7 +190,6 @@ impl Settings {
     }
 
     /// Refuses settings the relay cannot run with.
-    #[allow(dead_code)] // The relay checks them as it starts.
     pub(crate) fn check(&self) -> Result<(), Error> {
         let misuse = |why: String| Err(Error::Misuse(why));
         if self.stream.is_empty()

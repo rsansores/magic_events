@@ -784,6 +784,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
  "trybuild",
  "uuid",
 ]

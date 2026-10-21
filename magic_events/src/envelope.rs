@@ -9,9 +9,6 @@
 //!
 //! [NATS protocol binding]: https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/nats-protocol-binding.md
 
-// The relay, which publishes these, comes next.
-#![allow(dead_code)]
-
 use crate::Error;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::ser::{self, Serialize};

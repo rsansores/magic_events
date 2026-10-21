@@ -1,0 +1,59 @@
+name: Nightly
+
+# The relay's walks with seeds drawn for the night: each run of CI takes the
+# same four, which find only what those paths reach. A walk that fails names
+# its seed; `MAGIC_EVENTS_WALK_SEEDS=<seed>` takes it again anywhere, and a
+# seed worth keeping joins `SEEDS` in `walk_tests.rs`.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  walks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      NATS_URL: nats://localhost:4222
+      MAGIC_EVENTS_WALK_SEEDS: random
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      # A service container takes no arguments, and JetStream is one (`-js`).
+      - name: A NATS server with JetStream
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2.15.1 -js
+          for _ in $(seq 30); do
+            docker logs nats 2>&1 | grep -q "Server is ready" && exit 0
+            sleep 1
+          done
+          docker logs nats
+          exit 1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --locked -p magic_events -- --nocapture walk_tests::

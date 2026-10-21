@@ -14,6 +14,14 @@ pub enum Error {
     /// be published. Nothing was written; the same event fails the same way.
     #[error("{0}")]
     Invalid(String),
+    /// The broker failed, or refused what the relay asked of it.
+    #[error("{reason}")]
+    Broker {
+        /// Why, as the broker says it.
+        reason: String,
+        /// Whether the same call may succeed once the broker is back.
+        transient: bool,
+    },
 }
 
 impl Error {
@@ -27,6 +35,7 @@ impl Error {
         match self {
             Error::Database(e) => is_transient_sqlx(e),
             Error::Misuse(_) | Error::Invalid(_) => false,
+            Error::Broker { transient, .. } => *transient,
         }
     }
 }

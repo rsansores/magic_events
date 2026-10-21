@@ -53,7 +53,6 @@ pub(crate) async fn install(conn: &mut PgConnection) -> Result<(), Error> {
 }
 
 /// Refuses a database whose schema is not at this build's version.
-#[allow(dead_code)] // The relay checks it as it starts.
 pub(crate) async fn check(conn: &mut PgConnection) -> Result<(), Error> {
     match version(conn).await? {
         Some(v) if v == SCHEMA_VERSION => Ok(()),
