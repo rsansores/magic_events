@@ -205,6 +205,26 @@ jobs:
           workspaces: examples/shop
       - run: cargo build --locked --manifest-path examples/shop/Cargo.toml
 
+  # The shop's events page: a Vue app over the dashboard, built from source.
+  example-page:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: dashboard/package.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile --ignore-scripts && pnpm build
+        working-directory: dashboard
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: examples/shop/web
+      - run: pnpm format:check && pnpm lint && pnpm build
+        working-directory: examples/shop/web
+
   dashboard:
     runs-on: ubuntu-latest
     defaults:

@@ -21,6 +21,7 @@ updates:
   - package-ecosystem: npm
     directories:
       - /dashboard
+      - /examples/shop/web
     schedule:
       interval: weekly
     cooldown:

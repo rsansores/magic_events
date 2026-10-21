@@ -25,6 +25,9 @@ The first release. Schema 1. Dashboard contract 1.
   serialized as contract 1 for **`magic_events_dashboard`**, a Vue 3
   package, headless or ready-made.
 - **`consume`** (feature `consume`): a Rust consumer that decodes each
-  event into its type and acknowledges once the handler answers `Ok`.
+  event into its type, one at a time, acknowledges once the handler answers
+  `Ok`, and waits out a broker that goes away.
+- **The shop example**: a shop that writes and relays, two consumers, and
+  an events page over the dashboard.
 - **The schema** `magic_events`: `Events::install`, or `migration(1)` for a
   host with migrations of its own.

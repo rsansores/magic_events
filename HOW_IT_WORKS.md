@@ -15,7 +15,7 @@ The schema `magic_events` (`magic_events/sql/postgres/1.sql`):
 | `version` | one row: the schema's version. `Events::start` refuses another. |
 | `outbox` | the events committed and not published yet, one row each, in emit order (`id`, a `bigserial`). A `TRUNCATE` is refused: it would drop committed events with no trace. |
 | `relay` | one row: how the relay is doing (`last_published_at`, `failures`, `last_error`, `retry_after`), and `max_body`, the largest body `emit` takes, written by `Events::start`. |
-| `published` | messages published, per day (UTC) and type: the outbox forgets what it published, these count it. |
+| `published` | messages published, per day (UTC) and type: the outbox forgets what it published, these count it. The relay forgets days older than 90; the status reads the last 30. |
 
 An outbox row holds the event's id (`event_id`, a UUIDv7: its `ce-id` and
 its `Nats-Msg-Id`), its subject after the prefix, its type with the version
@@ -23,7 +23,10 @@ its `Nats-Msg-Id`), its subject after the prefix, its type with the version
 `ce-subject` when there is one), the body, when it was emitted
 (`clock_timestamp()`, its `ce-time`), and — for a message the broker
 refuses — how often, why, and when it was set aside (`parked_at`). A
-partial index on `id` where `parked_at IS NULL` is what the relay reads.
+partial index on `id` where `parked_at IS NULL` is what the relay reads, and
+one where it is not is what the status lists set-aside rows by. The table is
+a queue — rows inserted and deleted all day — so it is vacuumed every
+thousand dead rows, whatever its size, and without the default's pauses.
 
 The tables change only by a new step (`sql/postgres/<n>.sql`), never by
 editing one that was released: `migration(n)` is that step as a script that
@@ -38,10 +41,12 @@ installing at once take turns.
 1. asks the event — the code the derive wrote — for its type, version,
    subject tokens and `ce-subject`;
 2. refuses, before anything is written, a subject token that is empty or
-   holds a `.`, `*`, `>`, whitespace or anything but printable ASCII, and a
-   token or `ce-subject` over 1 KiB;
+   holds a `.`, `*`, `>`, whitespace or anything but printable ASCII, a
+   subject over 1 KiB, and a `ce-subject` over 1 KiB once percent-encoded —
+   with the source and the prefix the settings hold to similar limits, a
+   message's headers stay within the 4 KiB `start` keeps for them;
 3. serializes the body: the event's JSON, or for an enum the variant's own
-   fields (the variant is in `ce-type`);
+   fields (the variant is in `ce-type`) — an object, or it is refused;
 4. runs one statement: it reads `relay.max_body` (64 KiB when no relay
    recorded one) and inserts the row only if the body fits, answering which.
 
@@ -52,20 +57,30 @@ so a change to either applies to what is still in the outbox.
 ## The relay
 
 `Events::start` checks the settings, the schema's version, and that
-`max_body` with 4 KiB of headers fits the broker's `max_payload`; records
-`max_body`; creates the stream or brings it to the settings (or, with
-`manage_stream(false)`, checks that it takes every subject under the
-prefix); and spawns the relay in a task of its own.
+`max_body` with 4 KiB of headers fits the broker's `max_payload`; creates
+the stream or brings it to the settings (or, with `manage_stream(false)`,
+checks that it takes every subject under the prefix); records `max_body`
+for `emit` — every process that starts records its own, the last one
+counts; and spawns the relay in a task of its own.
 
 ### One at a time
 
 The relay runs where it holds a session advisory lock (`EVNTRLAY`), taken
-with `pg_try_advisory_lock` on a connection detached from the pool — one
-that closes, and lets go of the lock, if the task holding it is dropped
-mid-question rather than going back to the pool still holding it. A process
-that does not get the lock stands by and asks again every `standby`. When
-the leader's process dies or its connection drops, PostgreSQL releases the
-lock, and a process standing by takes it.
+with `pg_try_advisory_lock` on a connection of its own, opened with the
+pool's options rather than taken from it: it lives exactly as long as the
+lock, and closes — letting go of the lock — when the task holding it is
+dropped. A process that does not get the lock stands by and asks again
+every `standby`. When the leader's process dies or its connection drops,
+PostgreSQL releases the lock, and a process standing by takes it.
+
+The lock's session is set so the server ends it when the relay is gone
+without saying so: TCP keepalives after 10 s of silence, every 5 s, three
+missed; anything sent and unacknowledged for 20 s; a statement running past
+30 s cancelled; and the client looked for every 5 s while one runs. So a
+leader whose network dies — a partition, a frozen machine — loses its lock
+within about 30 seconds, not the hours the defaults take. On its side, every
+statement the relay sends is bounded by the same 30 s: a database that
+stops answering is taken for away, the lock let go, and the relay stands by.
 
 Each pass opens its transactions on the lock's own connection, and checks,
 inside each, that the server process it runs on holds the lock
@@ -120,7 +135,9 @@ remembers a position to skip past them; the relay reads what is there.
 | The broker refuses a message for good | Three attempts, then parked; the rows behind it go on; an error log, and the status lists it. | A fix (a larger `max_message_size`, say), then `unpark`. |
 | The relay's process dies mid-pass | Its lock is released; another process takes it within `standby`. Rows published and not deleted are sent again and dropped by the stream. | Nothing to do. |
 | The relay's connection is killed | Its fenced transactions fail; it finds its lock gone and stands by; another process (or itself) takes the lock. | Nothing to do. |
-| The relay is down longer than `duplicate_window`, right after a publish | The rows it published and did not delete are published again, and this time kept: a duplicate, with the same `ce-id`. | Consumers deduplicate by `ce-id`. |
+| The relay's network dies, or its database stops answering | Its statements give up within 30 s and it stands by; the server ends its session, and the lock, within about 30 s; another process takes over. | Nothing to do. |
+| The stream took a message, and the row was not deleted — the relay died, or the acknowledgement was lost — and it is sent again only after `duplicate_window` | Published again, and this time kept: a duplicate, with the same `ce-id`. | Consumers deduplicate by `ce-id`. |
+| A message is parked | The rest of its transaction's events go out before it; it follows them once unparked. | Consumers do not rely on order (a re-read does not need it). |
 | No process runs the relay | Events wait in the outbox; the status says no relay runs. | Starting one. |
 | A consumer is away | The stream keeps its messages for `retention`; the consumer's lag grows in the status. | The consumer coming back within `retention`. |
 
@@ -131,21 +148,29 @@ outbox under the filter (a NATS subject filter, turned into a regular
 expression on each row's full subject), its parked rows, the relay's row,
 whether any process holds the lock, the published counts — and asks the
 broker for the stream's state, its message count per subject under the
-filter, and its durable consumers. The broker's part is best-effort: one that
+filter, and its durable consumers. For every subject, the outbox is counted
+whole; a narrower filter is matched row by row. The broker's part is best-effort: one that
 does not answer within five seconds is left out, and the answer says why.
 A consumer's lag and the published counts cannot be narrowed by subject, so
 only an answer for every subject carries them.
 
-`Events::recent` reads the last messages through ordered consumers of the
-broker's own — ephemeral, left behind by nothing — each starting further
-back until it has what it was asked for or reaches the stream's start.
+`Events::recent` reads the last messages — 1,000 at most — through ordered
+consumers of the broker's own, ephemeral, leaving nothing behind: each
+starts further back until it has what it was asked for or reaches the
+stream's start, keeping only the last it read.
 
 ## Consuming
 
 `consume` creates or resumes a durable pull consumer with explicit
-acknowledgements. It reads `ce-type`, finds which of `E`'s events that is,
-and decodes the body into it — for an enum, by the variant's place, so serde
-renames do not matter. A handler's `Ok` acknowledges; an error asks for a
-redelivery after 1 s, doubling with each delivery up to a minute; a message
+acknowledgements — and refuses one of that name that reads another filter,
+whose events `E` would not know. It takes one message at a time, so none
+waits in a buffer while its acknowledgement's 30 s run out, and tells the
+broker every 10 s that a slow handler is still at work. It reads `ce-type`,
+finds which of `E`'s events that is, and decodes the body into it — for an
+enum, by the variant's place, so serde renames do not matter. A handler's
+`Ok` acknowledges; an error asks for a redelivery after 1 s, doubling with
+each delivery up to a minute, and the events behind it go first; a message
 `E` cannot read is terminated — never delivered to that consumer again —
-with an error logged.
+with an error logged. A broker that goes away is waited for: the client
+reconnects and the consumer goes on, and an answer lost on the way means
+the event comes again.

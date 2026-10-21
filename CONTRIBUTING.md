@@ -96,6 +96,8 @@ cargo +nightly-2026-10-10 public-api -p magic_events --all-features -s > magic_e
 - **public-api** — the API against `magic_events/public-api/`.
 - **msrv** — the crates build on Rust 1.88.
 - **example** — the shop builds against the crate as it is.
+- **example-page** — the dashboard builds from source, and the shop's
+  events page (formatting, lint, types) over it.
 - **dashboard** — its formatting, lint, types, unused code (knip), tests,
   and the packed tarball as npm and TypeScript read it.
 - **links** — every link into the repository resolves.

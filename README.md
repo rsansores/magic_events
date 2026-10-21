@@ -44,6 +44,22 @@ that cares reads it with a durable consumer of its own.
 You write `emit`. You do not write the outbox table, the relay, its lock,
 its retries or its deduplication.
 
+![The shop example's events page: the outbox waits while the broker is away](https://raw.githubusercontent.com/rsansores/magic_events/main/dashboard/images/broker-away.png)
+
+*[The shop example](examples/shop) with its broker stopped: orders keep
+committing, their events wait in the outbox, and the relay says why. Start
+the broker again and everything goes out, once.*
+
+## Requirements
+
+- **Rust** 1.88 or later, and a Tokio runtime.
+- **PostgreSQL** 14 or later: the outbox is a table in your database, in a
+  schema of its own (`magic_events`).
+- **A NATS server with JetStream enabled** (`nats-server -js`, or a cluster
+  with JetStream on): the relay publishes to a JetStream stream, which it
+  creates unless you say it is yours. Tested with NATS 2.15.
+- For the dashboard, Vue 3.5 or later.
+
 ## Why
 
 Your data is in PostgreSQL, and other systems need to know when it changes.
@@ -70,17 +86,21 @@ that, behind one function.
   the outbox only after the stream acknowledged its message. Each message
   carries its event's id as `Nats-Msg-Id`, and the stream drops a message
   it already holds within its duplicate window (2 minutes by default). A
-  duplicate is possible only past that window: the relay died after the
-  stream took a message and before it deleted the row, and no relay ran
-  again for longer than the window.
+  duplicate is possible only past that window: the stream took a message,
+  and the row was not deleted — the relay died, or the acknowledgement was
+  lost with the broker going away — and the message was sent again only
+  after longer than the window.
 - **The events of one transaction go out in the order they were emitted.**
   Events of *concurrent* transactions go out in the order of their rows'
   ids, which is not commit order: a transaction that commits later with a
   lower id is published late — but never lost, since rows are deleted, not
-  passed by a cursor. With more than one message in flight (`in_flight`,
-  64 by default), a message the broker loses in the middle of a pipeline,
-  while one after it is stored, lands after it when it is sent again;
-  `in_flight(1)` gives strict order at half the throughput.
+  passed by a cursor. Two things can put an event of a transaction after
+  the ones emitted after it: a message the broker refuses for good, which
+  is set aside while the rest go on (below); and, with more than one
+  message in flight (`in_flight`, 64 by default), a message the broker
+  loses in the middle of a pipeline while one after it is stored, which
+  lands after it when it is sent again. `in_flight(1)` rules out the second
+  at a quarter of the throughput.
 - **When the broker is down, nothing is dropped.** The outbox grows, the
   relay backs off (500 ms doubling to a minute), and everything goes out
   once the broker is back. `status()` shows the outbox's depth and age, so
@@ -118,8 +138,7 @@ are a contract of their own, not a copy of your tables.
   that subscribes, each at its own pace, and replayed within its retention.
 
 It is not a stream processor and not an event store: the events are
-notifications, and your tables stay the truth. PostgreSQL 14 or later, and
-NATS with JetStream (tested with 2.15).
+notifications, and your tables stay the truth.
 
 ## Events
 
@@ -171,7 +190,7 @@ pub enum Catalog {
   default (`Settings::max_body`).
 - `#[event(ce_subject = "{id}")]` sets the CloudEvents `subject` attribute.
 
-`emit` does no network I/O: it is one `INSERT`, about 16 µs over the write
+`emit` does no network I/O: it is one `INSERT`, about 17 µs over the write
 it goes with (below). Call it where you write, in the same transaction —
 there is no other way to emit.
 
@@ -230,7 +249,13 @@ Settings::new("SHOP_EVENTS", "//shop.example.com")
 The relay runs inside your process, in a task of its own: no service to
 deploy. Every process that calls `Events::start` competes for one advisory
 lock; one publishes, the others stand by, and one of them takes over within
-`standby` when it stops or dies.
+`standby` when it stops or dies. When the leader's network dies instead —
+a partition, a frozen machine — PostgreSQL ends its session, and lets the
+lock go, within about 30 seconds; a leader whose database stops answering
+gives up within 30 seconds too, and stands by.
+
+Every process records its `max_body` as it starts, and `emit` holds bodies
+to the last one recorded: give every process the same settings.
 
 ## The messages
 
@@ -271,8 +296,9 @@ nats consumer next SHOP_EVENTS billing --count 10
 ```
 
 In Rust, with the `consume` feature, the events arrive decoded into your
-own type, acknowledged when your handler answers `Ok` and delivered again
-after a backoff when it fails:
+own type, one at a time, acknowledged when your handler answers `Ok` and
+delivered again after a backoff when it fails; a broker that goes away is
+waited for:
 
 ```rust
 consume(
@@ -332,6 +358,8 @@ let one_store = events
     .await?;
 let last_ten = events.recent(&Filter::all(), 10).await?;
 ```
+
+![The shop example's events page, with events flowing](https://raw.githubusercontent.com/rsansores/magic_events/main/dashboard/images/flowing.png)
 
 Every read takes a subject filter, so a view can be narrowed to what one
 caller may see. A consumer's lag is the whole stream's, and the published
@@ -406,11 +434,11 @@ publishes nothing, and logs an error that names the pooler.
 On a 13th-gen Intel i9-13900 (32 threads), PostgreSQL 18 and NATS 2.15 on
 the same machine, 2026-10-21:
 
-- `emit` costs about **16 µs** over the write it goes with (a one-row
+- `emit` costs about **17 µs** over the write it goes with (a one-row
   `INSERT` alone: about 10 µs), apart from the commit, whose wait for the
   disk is the same either way and much longer.
-- The relay publishes about **5,400 events a second** with one message in
-  flight, **8,800** with 16, and **11,000** with 64 (the default), to a
+- The relay publishes about **6,000 events a second** with one message in
+  flight, **16,000** with 16, and **26,000** with 64 (the default), to a
   stream on file, in batches of 256.
 
 `cargo test -p magic_events --release bench_ -- --ignored --nocapture --test-threads 1`

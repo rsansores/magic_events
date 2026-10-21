@@ -5,6 +5,8 @@ for Vue 3: whether events are leaving PostgreSQL, what waits in the outbox
 and why, what was set aside, and which consuming system is behind. One green
 banner when events flow, which is most of the time.
 
+![The ready-made dashboard over the shop example, its broker stopped](https://raw.githubusercontent.com/rsansores/magic_events/main/dashboard/images/broker-away.png)
+
 It knows no URL. Your server asks the relay (`Events::status`, and
 `Events::recent` if you show recent events) from its own handlers, behind its
 own authorization, with the `Filter` the caller may see, and returns the

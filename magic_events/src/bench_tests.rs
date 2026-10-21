@@ -5,9 +5,8 @@
 //! cargo test -p magic_events --release bench_ -- --ignored --nocapture --test-threads 1
 //! ```
 
-use crate::tests::{idle, shipped, Broker};
+use crate::tests::{shipped, Broker};
 use sqlx::PgPool;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const EVENTS: u64 = 20_000;
@@ -56,11 +55,13 @@ async fn bench_emit_overhead(pool: PgPool) {
     );
 }
 
-/// The relay draining an outbox of `EVENTS` rows into a stream on file, at
-/// each `in_flight`.
+/// The running relay draining an outbox of `EVENTS` rows into a stream on
+/// file, at each `in_flight`: as a host runs it, on its own lock's
+/// connection, pass after pass.
 #[sqlx::test(migrations = false)]
 #[ignore]
 async fn bench_relay_throughput(pool: PgPool) {
+    crate::Events::install(&pool).await.unwrap();
     for in_flight in [1, 16, 64] {
         let mut broker = Broker::new().await;
         broker.settings = broker
@@ -68,15 +69,24 @@ async fn bench_relay_throughput(pool: PgPool) {
             .clone()
             .storage(crate::Storage::File)
             .in_flight(in_flight);
-        let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
         let mut tx = pool.begin().await.unwrap();
         for n in 0..EVENTS {
             crate::emit(&mut tx, &shipped("north", n)).await.unwrap();
         }
         tx.commit().await.unwrap();
         let start = Instant::now();
-        while events.pass_now().await.unwrap().unwrap() > 0 {}
+        let events = crate::Events::start(
+            pool.clone(),
+            broker.jetstream.clone(),
+            broker.settings.clone(),
+        )
+        .await
+        .unwrap();
+        while crate::tests::count(&pool, "SELECT count(*) FROM magic_events.outbox").await > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let took = start.elapsed();
+        events.stop().await;
         println!(
             "relay: {:.0} events a second at in_flight {in_flight}",
             EVENTS as f64 / took.as_secs_f64()
