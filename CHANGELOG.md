@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 — unreleased
+
+Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.
+The crates are unchanged but for their version.
+
+- **`useEventsView`** (dashboard): the headless dashboard over answers the
+  host already holds — `Events::status` and, optionally, `Events::recent`,
+  read through its own data layer (vue-query, Pinia, a socket) with its own
+  cache, polling and errors. It fetches nothing and works out the same state
+  `useEventsDashboard` does, the recent events among it (`recent`,
+  `recentError`). `useEventsDashboard` is now `useEventsView` over a fetch
+  function, and answers as before.
+
 ## 0.1.1 — 2026-10-21
 
 Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.

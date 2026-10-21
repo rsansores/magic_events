@@ -134,6 +134,39 @@ dash.refresh() // fetch now
 is called in a component's `setup` or an effect scope; called anywhere else it
 has nothing to tie a timer to, and fetches nothing until `refresh()`.
 
+### Over your own data layer
+
+An app that reads its server through a data layer — vue-query, Pinia, a
+socket — reads the relay's answers the way it reads everything else, with its
+own cache, polling and errors, and hands them to `useEventsView`. It fetches
+nothing: it works out the same state from whatever answer it is given now,
+and follows the next.
+
+```ts
+import { useQuery } from '@tanstack/vue-query'
+import { useEventsView } from 'magic_events_dashboard'
+
+const status = useQuery({
+  queryKey: ['events', 'status'],
+  queryFn: fetchEventsStatus,
+  refetchInterval: 10_000,
+})
+const recent = useQuery({
+  queryKey: ['events', 'recent'],
+  queryFn: fetchEventsRecent,
+  refetchInterval: 10_000,
+})
+
+const view = useEventsView(status.data, { recent: recent.data })
+view.error.value // another contract, or a time that does not read; null while there is no answer
+view.banner.value // as above, and health, status, consumers, published, speech
+view.recent.value // the recent events, newest first; null without an answer that reads
+view.recentError.value // a recent answer of another contract, or null
+```
+
+A failed or pending read is the data layer's to say (`status.isError`,
+`status.isPending`): `useEventsView` has no fetch of its own to fail.
+
 Everything that does not need Vue — the types, `healthOf`, `consumersOf`,
 `publishedByDay`, `publishedByType`, `recentOf`, the sentence functions and
 `translator` — is also in `magic_events_dashboard/core`.
