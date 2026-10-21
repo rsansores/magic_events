@@ -1,0 +1,5 @@
+error: expected `type`, `version`, `subject`, `ce_subject` or `crate`
+ --> tests/derive/fail/unknown_key.rs:2:74
+  |
+2 | #[event(type = "order.shipped", version = 1, subject = "orders.shipped", topic = "orders")]
+  |                                                                          ^^^^^

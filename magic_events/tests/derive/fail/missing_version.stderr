@@ -1,0 +1,5 @@
+error: `Catalog::ProductUpdated` needs `#[event(version = …)]`: every event says its `type`, `version` and `subject`
+ --> tests/derive/fail/missing_version.rs:4:5
+  |
+4 |     ProductUpdated { ids: Vec<u64> },
+  |     ^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: `orders.{store} now` holds ' ': a subject token is printable ASCII, with no whitespace and no `*` or `>`
+ --> tests/derive/fail/whitespace_token.rs:2:56
+  |
+2 | #[event(type = "order.shipped", version = 1, subject = "orders.{store} now")]
+  |                                                        ^^^^^^^^^^^^^^^^^^^^

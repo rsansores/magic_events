@@ -1,0 +1,5 @@
+error: `OrderShipped` needs `#[event(type = …)]`: every event says its `type`, `version` and `subject`
+ --> tests/derive/fail/missing_type.rs:3:8
+  |
+3 | struct OrderShipped {
+  |        ^^^^^^^^^^^^

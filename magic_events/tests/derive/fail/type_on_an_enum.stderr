@@ -1,0 +1,5 @@
+error: on an enum, `#[event(…)]` takes only `crate`: each variant says its own `type`, `version` and `subject`
+ --> tests/derive/fail/type_on_an_enum.rs:2:9
+  |
+2 | #[event(type = "catalog", version = 1, subject = "catalog")]
+  |         ^^^^

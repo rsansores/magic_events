@@ -1,0 +1,5 @@
+error: `order shipped` is no event type: one is printable ASCII, with no whitespace, as `order.shipped`
+ --> tests/derive/fail/type_with_whitespace.rs:2:16
+  |
+2 | #[event(type = "order shipped", version = 1, subject = "orders.shipped")]
+  |                ^^^^^^^^^^^^^^^

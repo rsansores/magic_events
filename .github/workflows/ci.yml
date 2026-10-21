@@ -122,6 +122,26 @@ jobs:
           key: postgres-${{ matrix.postgres }}
       - run: cargo test --locked --workspace
 
+  # The derive's refusals, with the compiler's own words: held to the one
+  # rustc the messages checked in were written with (`magic_events/tests/derive.rs`
+  # names it; the other jobs build what the derive accepts and leave the
+  # words alone).
+  diagnostics:
+    runs-on: ubuntu-latest
+    env:
+      MAGIC_EVENTS_PINNED_DIAGNOSTICS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.97.1"
+          # The expected messages quote the crate's source, as rustc shows it.
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --locked -p magic_events --test derive
+
   msrv:
     runs-on: ubuntu-latest
     steps:

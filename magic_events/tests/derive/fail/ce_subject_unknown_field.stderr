@@ -1,0 +1,5 @@
+error: `{id}` names no field of `OrderShipped`
+ --> tests/derive/fail/ce_subject_unknown_field.rs:2:87
+  |
+2 | #[event(type = "order.shipped", version = 1, subject = "orders.shipped", ce_subject = "{id}")]
+  |                                                                                       ^^^^^^

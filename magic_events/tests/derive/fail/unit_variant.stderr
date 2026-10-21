@@ -1,0 +1,5 @@
+error: `Reset` carries no fields of its own: a variant of an event enum has named fields, or wraps one struct, as its body
+ --> tests/derive/fail/unit_variant.rs:4:5
+  |
+4 |     Reset,
+  |     ^^^^^

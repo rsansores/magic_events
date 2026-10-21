@@ -1,0 +1,5 @@
+error: `{shop}` names no field of `OrderShipped`
+ --> tests/derive/fail/unknown_field.rs:2:56
+  |
+2 | #[event(type = "order.shipped", version = 1, subject = "orders.{shop}.shipped")]
+  |                                                        ^^^^^^^^^^^^^^^^^^^^^^^

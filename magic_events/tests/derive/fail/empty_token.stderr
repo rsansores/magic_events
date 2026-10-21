@@ -1,0 +1,5 @@
+error: `orders..shipped` has an empty token: tokens are joined by single dots
+ --> tests/derive/fail/empty_token.rs:2:56
+  |
+2 | #[event(type = "order.shipped", version = 1, subject = "orders..shipped")]
+  |                                                        ^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: `ProductChanged` is type `product.updated` version 1, as `ProductUpdated` is: each variant is an event of its own
+ --> tests/derive/fail/duplicate_type.rs:6:5
+  |
+6 |     ProductChanged { ids: Vec<u64> },
+  |     ^^^^^^^^^^^^^^

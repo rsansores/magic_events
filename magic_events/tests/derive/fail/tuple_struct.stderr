@@ -1,0 +1,5 @@
+error: an event is a struct with named fields, or an enum of such events: its body is a JSON object
+ --> tests/derive/fail/tuple_struct.rs:3:8
+  |
+3 | struct OrderShipped(Vec<u64>);
+  |        ^^^^^^^^^^^^

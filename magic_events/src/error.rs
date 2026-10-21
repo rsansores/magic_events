@@ -10,6 +10,10 @@ pub enum Error {
     /// programming or an operations error, never the data's.
     #[error("{0}")]
     Misuse(String),
+    /// An event [`emit`](crate::emit) refuses as it is: one that could never
+    /// be published. Nothing was written; the same event fails the same way.
+    #[error("{0}")]
+    Invalid(String),
 }
 
 impl Error {
@@ -22,7 +26,7 @@ impl Error {
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Database(e) => is_transient_sqlx(e),
-            Error::Misuse(_) => false,
+            Error::Misuse(_) | Error::Invalid(_) => false,
         }
     }
 }

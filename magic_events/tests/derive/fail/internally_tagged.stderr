@@ -1,0 +1,5 @@
+error: `#[serde(tag)]`: an event enum is serialized as serde does by default (externally tagged), and its body is the variant's own fields
+ --> tests/derive/fail/internally_tagged.rs:2:9
+  |
+2 | #[serde(tag = "kind")]
+  |         ^^^

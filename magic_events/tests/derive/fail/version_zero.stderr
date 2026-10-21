@@ -1,0 +1,5 @@
+error: a version is a whole number from 1
+ --> tests/derive/fail/version_zero.rs:2:43
+  |
+2 | #[event(type = "order.shipped", version = 0, subject = "orders.shipped")]
+  |                                           ^

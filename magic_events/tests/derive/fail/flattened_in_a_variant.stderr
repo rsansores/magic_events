@@ -1,0 +1,5 @@
+error: `#[serde(flatten)]` in a variant: its body is its own fields, one JSON object, which the derive writes field by field
+  --> tests/derive/fail/flattened_in_a_variant.rs:10:17
+   |
+10 |         #[serde(flatten)]
+   |                 ^^^^^^^

@@ -1,0 +1,13 @@
+error[E0277]: `Vec<u64>` doesn't implement `std::fmt::Display`
+ --> tests/derive/fail/not_display.rs:2:56
+  |
+1 | #[derive(serde::Serialize, magic_events::Event)]
+  |                            ------------------- required by a bound introduced by this call
+2 | #[event(type = "order.shipped", version = 1, subject = "orders.{ids}.shipped")]
+  |                                                        ^^^^^^^^^^^^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Vec<u64>`
+  |
+note: required by a bound in `magic_events::__private::push`
+ --> src/lib.rs
+  |
+  |     pub fn push<T: std::fmt::Display + ?Sized>(out: &mut String, value: &T) {
+  |                    ^^^^^^^^^^^^^^^^^ required by this bound in `push`
