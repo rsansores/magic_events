@@ -1,0 +1,7 @@
+# Build output and generated data — never format.
+dist
+coverage
+node_modules
+pnpm-lock.yaml
+# Written by the engine's tests (magic_events/src/status.rs, status_tests.rs).
+src/core/contract

@@ -153,3 +153,33 @@ jobs:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo check --locked --workspace
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      # The pnpm version comes from package.json's `packageManager`.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: dashboard/package.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm format:check
+      - run: pnpm lint
+      # Checks the relay's answers in src/core/contract/fixtures/ against the
+      # types generated from the crate's own, both of which the crate's tests
+      # keep equal to what it serializes.
+      - run: pnpm type-check
+      - run: pnpm knip
+      - run: pnpm test
+      # Builds, packs, and lints the tarball as npm and TypeScript read it.
+      - run: pnpm check:pack

@@ -1,0 +1,190 @@
+/* The ready-made dashboard's look, every value a variable: a host sets the
+   --med-* variables, on .med or any ancestor, to its own tokens. The
+   defaults keep every text at a contrast of 4.5:1 or more against the
+   surface it is drawn on (src/styles/contrast.test.ts). */
+
+.med {
+  /* Each look reads its --med-* variable, set here or on any ancestor, and
+     falls back to its default. */
+  --_fg: var(--med-fg, #1d2433);
+  --_muted: var(--med-muted, #5c6475);
+  --_bg: var(--med-bg, transparent);
+  --_card: var(--med-card, #ffffff);
+  --_border: var(--med-border, #e3e6ee);
+  --_accent: var(--med-accent, #3b5bdb);
+  --_ok: var(--med-ok, #237032);
+  --_warn: var(--med-warn, #a65200);
+  --_danger: var(--med-danger, #c92a2a);
+  --_ok-soft: var(--med-ok-soft, #ebfbee);
+  --_warn-soft: var(--med-warn-soft, #fff4e6);
+  --_danger-soft: var(--med-danger-soft, #fff5f5);
+  --_radius: var(--med-radius, 10px);
+  --_gap: var(--med-gap, 12px);
+
+  font-family: var(--med-font, inherit);
+  color: var(--_fg);
+  background: var(--_bg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--_gap);
+  min-width: 0;
+}
+
+.med *,
+.med *::before,
+.med *::after {
+  box-sizing: border-box;
+}
+
+.med-title,
+.med-heading,
+.med-line,
+.med-list {
+  margin: 0;
+}
+
+.med-banner {
+  display: flex;
+  gap: var(--_gap);
+  align-items: flex-start;
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: var(--_radius);
+  border: 1px solid var(--_border);
+  background: var(--_card);
+}
+.med-banner[data-mood='ok'] {
+  background: var(--_ok-soft);
+  border-color: var(--_ok);
+  --_mood: var(--_ok);
+}
+.med-banner[data-mood='lagging'] {
+  background: var(--_warn-soft);
+  border-color: var(--_warn);
+  --_mood: var(--_warn);
+}
+.med-banner[data-mood='stuck'],
+.med-banner[data-mood='down'] {
+  background: var(--_danger-soft);
+  border-color: var(--_danger);
+  --_mood: var(--_danger);
+}
+.med-title {
+  font-size: 1.05em;
+  font-weight: 600;
+}
+.med-heading {
+  font-size: 0.95em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.med-line {
+  color: var(--_muted);
+}
+.med-line[data-running='true'] {
+  color: var(--_ok);
+}
+.med-line[data-running='false'] {
+  color: var(--_danger);
+}
+
+.med-dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 0.35em;
+  border-radius: 50%;
+  background: var(--_mood, var(--_muted));
+}
+
+.med-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--_gap);
+}
+.med-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--_border);
+  border-radius: var(--_radius);
+  background: var(--_card);
+  min-width: 0;
+}
+
+.med-figures {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+}
+.med-figures dt {
+  color: var(--_muted);
+  font-size: 0.85em;
+}
+.med-figures dd {
+  margin: 0;
+  font-size: 1.2em;
+  font-variant-numeric: tabular-nums;
+}
+
+.med-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.med-count {
+  color: var(--_muted);
+  font-variant-numeric: tabular-nums;
+}
+.med-filter {
+  display: block;
+  color: var(--_muted);
+  font-weight: normal;
+  font-size: 0.85em;
+}
+
+.med-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.med-table th,
+.med-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--_border);
+  vertical-align: top;
+}
+.med-table thead th {
+  color: var(--_muted);
+  font-weight: normal;
+  font-size: 0.85em;
+}
+.med-table tr[data-behind='true'] td:nth-child(2) {
+  color: var(--_warn);
+  font-weight: 600;
+}
+
+.med-button {
+  font: inherit;
+  color: var(--_accent);
+  background: none;
+  border: 1px solid var(--_border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.med-body {
+  margin: 4px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--_bg);
+  border: 1px solid var(--_border);
+  font-size: 0.85em;
+  overflow-x: auto;
+}

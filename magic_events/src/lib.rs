@@ -29,6 +29,7 @@ mod relay;
 mod run;
 mod schema;
 mod settings;
+pub mod status;
 mod stream;
 
 pub use emit::emit;

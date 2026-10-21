@@ -185,6 +185,7 @@ async fn the_relay_backs_off_while_the_broker_is_away(pool: PgPool) {
         )
         .await
         .unwrap(),
+        broker.jetstream.clone(),
     );
     until("six tries", || async {
         faulty.sent.lock().unwrap().len() >= 6

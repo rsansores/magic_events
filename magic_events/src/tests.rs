@@ -198,6 +198,7 @@ pub(crate) async fn idle(pool: &PgPool, broker: &Broker, publish: Arc<dyn Publis
         Events::prepare(pool.clone(), publish, broker.settings.clone())
             .await
             .unwrap(),
+        broker.jetstream.clone(),
     )
 }
 

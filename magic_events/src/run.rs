@@ -3,6 +3,7 @@
 use crate::publish::Publish;
 use crate::relay::{Lock, Relay};
 use crate::settings::HEADROOM;
+use crate::status::{self, Filter, Recent, Status};
 use crate::{schema, stream, Error, Settings};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use tokio::task::JoinHandle;
 /// again, and the stream drops it as a duplicate.
 pub struct Events {
     relay: Arc<Relay>,
+    jetstream: async_nats::jetstream::Context,
     stop: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
 }
@@ -77,7 +79,7 @@ impl Events {
         }
         let relay = Self::prepare(pool, Arc::new(jetstream.clone()), settings).await?;
         stream::ensure(&jetstream, &relay.settings).await?;
-        Ok(Self::spawn(relay))
+        Ok(Self::spawn(relay, jetstream))
     }
 
     /// The relay, checked and with its `max_body` recorded, not running yet.
@@ -102,7 +104,7 @@ impl Events {
     }
 
     /// `relay`, running in a task of its own.
-    pub(crate) fn spawn(relay: Relay) -> Self {
+    pub(crate) fn spawn(relay: Relay, jetstream: async_nats::jetstream::Context) -> Self {
         let relay = Arc::new(relay);
         let (stop, mut stopped) = watch::channel(false);
         let task = tokio::spawn({
@@ -117,6 +119,7 @@ impl Events {
         });
         Events {
             relay,
+            jetstream,
             stop,
             task: Some(task),
         }
@@ -124,9 +127,10 @@ impl Events {
 
     /// `relay`, not running: for tests that run each pass themselves.
     #[cfg(test)]
-    pub(crate) fn idle(relay: Relay) -> Self {
+    pub(crate) fn idle(relay: Relay, jetstream: async_nats::jetstream::Context) -> Self {
         Events {
             relay: Arc::new(relay),
+            jetstream,
             stop: watch::channel(false).0,
             task: None,
         }
@@ -222,6 +226,37 @@ impl Events {
     /// [`Error::Database`] when the database fails.
     pub async fn unpark_all(&self) -> Result<u64, Error> {
         self.unpark_where(None).await
+    }
+
+    /// What the relay, the outbox and the stream are as `filter` sees them:
+    /// see [`status`](crate::status). A broker that does not answer within
+    /// five seconds leaves its part out and says why, so the answer still
+    /// shows what the database knows.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Misuse`] for a filter that is not a subject filter under the
+    /// settings' prefix; [`Error::Database`] when the database fails.
+    pub async fn status(&self, filter: &Filter) -> Result<Status, Error> {
+        status::status(
+            &self.relay.pool,
+            &self.jetstream,
+            &self.relay.settings,
+            filter,
+        )
+        .await
+    }
+
+    /// The last `limit` messages the stream holds under `filter`, oldest
+    /// first, with their headers and bodies: read through the broker's
+    /// ephemeral ordered consumers, which leave nothing behind.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Misuse`] for a filter that is not a subject filter under the
+    /// settings' prefix; [`Error::Broker`] when the broker fails.
+    pub async fn recent(&self, filter: &Filter, limit: u32) -> Result<Recent, Error> {
+        status::recent(&self.jetstream, &self.relay.settings, filter, limit).await
     }
 
     async fn unpark_where(&self, id: Option<i64>) -> Result<u64, Error> {
