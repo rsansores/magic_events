@@ -50,7 +50,7 @@ installing at once take turns.
 4. runs one statement: it reads `relay.max_body` (64 KiB when no relay
    recorded one) and inserts the row only if the body fits, answering which.
 
-No network, no second round trip: the writer pays one `INSERT`. It does not
+No broker, no second round trip: the writer pays one `INSERT`. It does not
 know the subject prefix or the CloudEvents `source`; the relay adds both,
 so a change to either applies to what is still in the outbox.
 
@@ -169,8 +169,10 @@ broker every 10 s that a slow handler is still at work. It reads `ce-type`,
 finds which of `E`'s events that is, and decodes the body into it — for an
 enum, by the variant's place, so serde renames do not matter. A handler's
 `Ok` acknowledges; an error asks for a redelivery after 1 s, doubling with
-each delivery up to a minute, and the events behind it go first; a message
-`E` cannot read is terminated — never delivered to that consumer again —
-with an error logged. A broker that goes away is waited for: the client
+each delivery up to a minute, and the events behind it go first. A
+message of a type `E` does not declare comes again every minute, until a
+build that declares it reads it; one of a type `E` declares whose body does
+not decode is terminated — never delivered to that consumer again — with an
+error logged. A broker that goes away is waited for: the client
 reconnects and the consumer goes on, and an answer lost on the way means
 the event comes again.

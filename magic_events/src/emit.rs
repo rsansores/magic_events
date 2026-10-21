@@ -10,7 +10,7 @@ use uuid::Uuid;
 /// caller's transaction: it is published if and only if that transaction
 /// commits. Answers the event's id — its `ce-id`.
 ///
-/// It does no network I/O, so it may stand wherever a write does, and slows
+/// It does no broker I/O, so it may stand wherever a write does, and slows
 /// the writer by one `INSERT`.
 ///
 /// ```no_run

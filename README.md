@@ -188,9 +188,16 @@ pub enum Catalog {
 - **The body** is the event's JSON, as serde writes it — for an enum, the
   variant's own fields, since the variant is in `ce-type`. 64 KiB at most by
   default (`Settings::max_body`).
+- **A new version** is a new variant, on the same subject or another, and
+  goes out while consumers may still run the build before it. A consumer
+  that meets a type it does not declare yet must not drop it: `consume`
+  leaves it for a later build — it comes again every minute, the events
+  behind it going on — and a consumer in another language should do the
+  same (leave it unacknowledged, or `nak` it with a delay). So either side
+  may be upgraded first.
 - `#[event(ce_subject = "{id}")]` sets the CloudEvents `subject` attribute.
 
-`emit` does no network I/O: it is one `INSERT`, about 17 µs over the write
+`emit` does no broker I/O: it is one `INSERT`, about 17 µs over the write
 it goes with (below). Call it where you write, in the same transaction —
 there is no other way to emit.
 

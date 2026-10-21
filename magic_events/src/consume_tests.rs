@@ -71,21 +71,15 @@ fn what_is_emitted_decodes_as_it_was() {
         one
     );
 
-    for (ty, body, why) in [
-        (
-            "order.shipped.v3",
-            &b"{}"[..],
-            "no type this consumer declares",
-        ),
-        ("order.placed.v1", b"{\"store\":1}", "does not decode"),
-        (
-            "order.placed.v1",
-            b"{\"store\":\"a\",\"orders\":[]} x",
-            "does not decode",
-        ),
-    ] {
-        let refused = decode::<Orders>(ty, body).unwrap_err();
-        assert!(refused.contains(why), "{ty}: {refused}");
+    match decode::<Orders>("order.shipped.v3", b"{}") {
+        Err(Unread::Unknown(why)) => assert!(why.contains("no type this consumer declares")),
+        other => panic!("{other:?}"),
+    }
+    for body in [&b"{\"store\":1}"[..], b"{\"store\":\"a\",\"orders\":[]} x"] {
+        match decode::<Orders>("order.placed.v1", body) {
+            Err(Unread::Malformed(why)) => assert!(why.contains("does not decode"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
     assert_eq!(decoded("a%20b%"), "a b%");
     assert_eq!(decoded("%E2%82%AC%zz"), "€%zz");
@@ -198,10 +192,74 @@ async fn a_handler_that_fails_has_the_event_again(pool: PgPool) {
     broker.done().await;
 }
 
-/// A message of a type the consumer does not declare is set aside for it,
-/// and the ones after it come.
+/// The consumer, upgraded: it reads the orders, and `order.shipped`
+/// version 1 too.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, crate::Event)]
+enum Upgraded {
+    #[event(type = "order.placed", version = 1, subject = "orders.{store}.placed")]
+    Placed {
+        store: String,
+        #[serde(rename = "orders")]
+        ids: Vec<u64>,
+    },
+    #[event(
+        type = "order.shipped",
+        version = 1,
+        subject = "orders.{store}.shipped"
+    )]
+    ShippedV1 { store: String, n: u64 },
+}
+
+/// `order.placed` version 1, written by a producer that got its body wrong.
+#[derive(Serialize, crate::Event)]
+#[event(type = "order.placed", version = 1, subject = "orders.{store}.placed")]
+struct Misplaced {
+    store: String,
+    n: u64,
+}
+
+/// Runs `consume` of `Upgraded` for `durable` until it handled `wanted`
+/// events, or a second and a half passed: what it handled.
+async fn upgraded(broker: &Broker, durable: &str, filter: String, wanted: usize) -> Vec<Upgraded> {
+    let got: Arc<Mutex<Vec<Upgraded>>> = Arc::default();
+    let task = tokio::spawn({
+        let (jetstream, stream, durable) = (
+            broker.jetstream.clone(),
+            broker.settings.stream.clone(),
+            durable.to_owned(),
+        );
+        let got = got.clone();
+        async move {
+            consume(
+                &jetstream,
+                &stream,
+                &durable,
+                &filter,
+                move |d: Delivery<Upgraded>| {
+                    let got = got.clone();
+                    async move {
+                        got.lock().unwrap().push(d.event);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while got.lock().unwrap().len() < wanted && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    task.abort();
+    let got = got.lock().unwrap().clone();
+    got
+}
+
+/// An event of a type the consumer does not declare yet — the producer
+/// upgraded first — holds back nothing behind it, and is not lost: the
+/// consumer's next build, which declares it, reads it.
 #[sqlx::test(migrations = false)]
-async fn an_event_the_consumer_cannot_read_is_never_delivered_again(pool: PgPool) {
+async fn an_event_of_a_type_not_declared_waits_for_a_build_that_declares_it(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     // `order.shipped` version 1, which `Orders` does not declare.
@@ -213,10 +271,53 @@ async fn an_event_the_consumer_cannot_read_is_never_delivered_again(pool: PgPool
         got.lock().unwrap().len() == 1
     })
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     task.abort();
+    let _ = task.await;
     assert_eq!(got.lock().unwrap()[0].0, ids[0]);
-    assert_eq!(got.lock().unwrap().len(), 1);
+
+    let later = upgraded(&broker, "billing", format!("{prefix}.orders.>"), 1).await;
+    assert_eq!(
+        later,
+        [Upgraded::ShippedV1 {
+            store: "north".to_owned(),
+            n: 1
+        }]
+    );
+    broker.done().await;
+}
+
+/// An event of a type the consumer declares, whose body does not decode as
+/// that type, is never delivered to it again: no build reads it.
+#[sqlx::test(migrations = false)]
+async fn an_event_whose_body_does_not_decode_is_never_delivered_again(pool: PgPool) {
+    let broker = Broker::new().await;
+    let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
+    let mut tx = pool.begin().await.unwrap();
+    crate::emit(
+        &mut tx,
+        &Misplaced {
+            store: "north".to_owned(),
+            n: 1,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let ids = publish(&pool, &events, &[placed(2)]).await;
+    let prefix = &broker.settings.subject_prefix;
+    let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
+    until("the readable one", || async {
+        got.lock().unwrap().len() == 1
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+    assert_eq!(got.lock().unwrap()[0].0, ids[0]);
+    assert!(
+        upgraded(&broker, "billing", format!("{prefix}.orders.>"), 1)
+            .await
+            .is_empty()
+    );
     broker.done().await;
 }
 

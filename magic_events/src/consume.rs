@@ -39,6 +39,14 @@ const FIRST_WAIT: Duration = Duration::from_secs(1);
 /// The longest wait before an event a handler failed on is delivered again.
 const LONGEST_WAIT: Duration = Duration::from_secs(60);
 
+/// How long an event of a type this build does not declare waits before it
+/// comes again (a second in the crate's own tests).
+const UNKNOWN_WAIT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    LONGEST_WAIT
+};
+
 /// How long the broker waits for an acknowledgement before it delivers an
 /// event again: a handler still at work says so every [`PROGRESS_EVERY`].
 const ACK_WAIT: Duration = Duration::from_secs(30);
@@ -62,9 +70,13 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 /// a handler failed on is delivered again after the backoff, so the events
 /// behind it go first: order holds only while handlers succeed.
 ///
-/// An event `E` cannot read — a type it does not declare, a body that does
-/// not decode — is logged and terminated: it is never delivered to this
-/// consumer again. Its filter should take only what `E` declares.
+/// An event of a type `E` does not declare is logged and delivered again
+/// every minute, the events behind it going on, until a build that declares
+/// it reads it: a producer may emit a new type, or a new version, before
+/// its consumers are upgraded, and nothing is lost meanwhile. Its filter
+/// should take only what `E` declares, or will declare. An event of a type
+/// `E` declares, whose body does not decode as that type, is logged and
+/// terminated: it is never delivered to this consumer again.
 ///
 /// ```no_run
 /// use magic_events::consume::{consume, Delivery};
@@ -177,8 +189,19 @@ where
         let (id, ty) = (header("ce-id").unwrap_or_default(), header("ce-type"));
         let event = match ty.as_deref().map(|ty| decode::<E>(ty, &message.payload)) {
             Some(Ok(event)) => event,
-            Some(Err(why)) => {
-                tracing::error!(%id, subject = %message.subject, "events: an event this consumer cannot read — terminated: {why}");
+            // A type this build does not declare — one a producer started
+            // emitting before this consumer was upgraded, say — waits for a
+            // build that does: it comes again every minute, and the events
+            // behind it go on.
+            Some(Err(Unread::Unknown(why))) => {
+                tracing::error!(%id, subject = %message.subject, "events: an event of a type this consumer does not declare — it comes again until a build that declares it reads it: {why}");
+                answer(&message, AckKind::Nak(Some(UNKNOWN_WAIT)), durable).await;
+                continue;
+            }
+            // A type it declares, with a body that does not decode as that
+            // type: no build of this consumer reads it, ever.
+            Some(Err(Unread::Malformed(why))) => {
+                tracing::error!(%id, subject = %message.subject, "events: an event whose body does not decode as its type — terminated: {why}");
                 answer(&message, AckKind::Term, durable).await;
                 continue;
             }
@@ -254,12 +277,21 @@ fn decoded(value: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| value.to_owned())
 }
 
+/// Why an event was not read.
+#[derive(Debug)]
+pub(crate) enum Unread {
+    /// Its type is none `E` declares.
+    Unknown(String),
+    /// Its type is `E`'s, and its body does not decode as that type.
+    Malformed(String),
+}
+
 /// The event of type `ce_type` (as `order.shipped.v1`) whose body is `body`.
-pub(crate) fn decode<E: Event + DeserializeOwned>(ce_type: &str, body: &[u8]) -> Result<E, String> {
+pub(crate) fn decode<E: Event + DeserializeOwned>(ce_type: &str, body: &[u8]) -> Result<E, Unread> {
     let index = E::__TYPES
         .iter()
         .position(|(ty, version)| ce_type == format!("{ty}.v{version}"))
-        .ok_or_else(|| format!("`{ce_type}` is no type this consumer declares"))?;
+        .ok_or_else(|| Unread::Unknown(format!("`{ce_type}` is no type this consumer declares")))?;
     let decoded = if E::__ENUM {
         E::deserialize(Variant {
             index: u32::try_from(index).unwrap_or(u32::MAX),
@@ -268,7 +300,7 @@ pub(crate) fn decode<E: Event + DeserializeOwned>(ce_type: &str, body: &[u8]) ->
     } else {
         serde_json::from_slice(body)
     };
-    decoded.map_err(|e| format!("its body does not decode as `{ce_type}`: {e}"))
+    decoded.map_err(|e| Unread::Malformed(format!("its body does not decode as `{ce_type}`: {e}")))
 }
 
 /// One variant of an event enum, by its index, and its body: what serde's
