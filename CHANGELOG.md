@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+Schema 2: a new step, `magic_events/sql/postgres/2.sql` (`migration(2)`).
+Messages unchanged: an event of the main stream is published as before
+(`tests/golden/messages.txt` gains a case of another stream). Dashboard
+contract 1: fields added, none removed or changed.
+
+- **Several streams on one outbox.** An event names the stream it goes to,
+  `#[event(stream = "live")]`, per struct or per variant; one that names
+  none goes to the main stream, as every event did. `Settings::stream(key,
+  StreamSettings)` declares another stream — its own JetStream name,
+  subject prefix, retention, duplicate window, storage, replicas,
+  `max_body` and `manage_stream` — while the relay's settings stay on
+  `Settings`, and `Settings`' setters of a stream's settings set the main
+  one's, as before. One relay publishes every stream, in one process at a
+  time; each stream has its own passes, backoff, failures, parked rows and
+  counts, in id order within it, so a stream the broker fails — deleted,
+  full, slow — holds back no other. `Events::start` refuses a key declared
+  twice, two keys of one JetStream stream, and overlapping subject
+  prefixes. A stream declared once and no longer keeps its rows, and the
+  status lists it.
+- **`emit`** writes the event's stream and holds its body to that stream's
+  `max_body`; it refuses with `Error::Misuse`, writing nothing, an event of
+  a stream no relay ever declared.
+- **Status, recent and unpark per stream.** `Filter::stream(key)` reads
+  another stream; `Filter::all()` is the main one's, and
+  `Filter::subject(…)` the stream whose prefix it is under. `Status` and
+  `Recent` say which stream (`stream_key`), and a status of every subject
+  lists every stream's outbox and failures (`streams`, of `StreamOutbox`).
+  `Events::unpark_all` takes a `&Filter`: the parked rows of one stream,
+  under a subject filter. `Events::pass_now` runs a pass of every stream.
+- **`consume`** reads any stream, by its JetStream name, as before.
+- **The dashboard** lists the streams when there are several
+  (`streams`, `streamsOf`, `StreamRow`), and is stuck while events wait for
+  a stream no relay declares any more (`stream_undeclared`).
+
+Upgrading from 0.1:
+
+- **The schema**: `Events::install` runs step 2; a host with migrations of
+  its own adds one with `magic_events::migration(2)`. The step keeps every
+  row: what waits in the outbox, the relay's row and the counts become the
+  main stream's. On a large outbox it rebuilds the two indexes in the
+  migration's transaction.
+- **The grants**: the relay's role needs `INSERT` on `magic_events.relay`
+  too: `Events::start` writes a row for each stream it declares.
+- **A rolling deploy**: a writer of 0.1 still running after step 2 goes on
+  writing to the main stream. A relay of 0.1 still leading after it cannot
+  settle a pass — its counts no longer fit the table — and sends that batch
+  again until it stops, which the stream drops as duplicates only within
+  its `duplicate_window`; and it would publish an event of another stream
+  under the main stream's prefix. So stop the 0.1 relays within the
+  duplicate window of the step, and declare other streams only once no 0.1
+  process runs.
+- **The API**: `Events::unpark_all()` is `Events::unpark_all(&Filter::all())`
+  for the main stream. Added: `StreamSettings`, `Settings::stream`,
+  `Filter::stream`, `Status::stream_key`, `Status::streams`,
+  `StreamOutbox`, `Recent::stream_key`, `SCHEMA_VERSION` 2, and the
+  derive's `stream` key. `emit` may answer `Error::Misuse`.
+
 ## 0.1.3 — 2026-10-21
 
 Schema 1, unchanged. Messages unchanged. Dashboard contract 1, unchanged.

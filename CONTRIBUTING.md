@@ -32,8 +32,9 @@ messages it publishes (`magic_events/tests/golden/`), with
 fixtures (`dashboard/src/core/contract/`), written by the status tests with
 `UPDATE_CONTRACT=1`. Read the difference before committing it.
 
-The walk (`walk_tests.rs`) — writers committing and rolling back while
-relays start, stop, crash and lose their connection — takes the seeds in
+The walk (`walk_tests.rs`) — writers committing and rolling back to two
+streams while relays start, stop, crash and lose their connection, and one
+of the streams refuses everything for a while — takes the seeds in
 `SEEDS`; `MAGIC_EVENTS_WALK_SEEDS` gives it others, comma-separated, or
 `random`, and each walk prints its seed. A nightly workflow runs it with
 `random`: a walk that fails there is taken again with
