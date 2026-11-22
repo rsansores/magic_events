@@ -1,11 +1,11 @@
 //! The walk: writers commit and roll back at random, each transaction's
 //! events going to two streams, while relays start, stop, crash and lose
 //! their connection under them, and one of the streams refuses everything
-//! for a while; afterwards each stream holds exactly what committed to it —
+//! meanwhile; afterwards each stream holds exactly what committed to it —
 //! nothing lost, nothing twice, each transaction's events in the order it
-//! emitted them — and the other stream went on publishing while the one
-//! refused, and while one of its messages waited for an acknowledgement
-//! that did not come.
+//! emitted them. Then, with one relay that stays, the other stream goes on
+//! publishing while the one refuses, and while one of its messages waits
+//! for an acknowledgement that does not come.
 //!
 //! Each walk takes a seed, which decides what every writer and the killer
 //! do (the timing is the machine's). The walks take the seeds in [`SEEDS`];
@@ -137,21 +137,46 @@ async fn kill(
     ended
 }
 
-/// Has the stream `live` refuse every message — full, and discarding what
-/// is new — until the main stream has published while the relay counts
-/// `live`'s failures, then take messages again. A deleted stream would be
-/// made again by the next relay that starts; a full one is left as it is.
-async fn refuse_for_a_while(pool: &PgPool, broker: &Broker) {
+/// Has the stream `live` refuse every new message — full at what it holds,
+/// and discarding what is new — or take messages again. A deleted stream
+/// would be made again by the next relay that starts; a full one is left as
+/// it is.
+async fn refusing(broker: &Broker, refuse: bool) {
     let name = &broker.stream("live").name;
-    let set = |max_messages: i64, discard: DiscardPolicy| async move {
-        let mut stream = broker.jetstream.get_stream(name).await.unwrap();
-        let mut config = stream.info().await.unwrap().config.clone();
-        config.max_messages = max_messages;
-        config.discard = discard;
-        broker.jetstream.update_stream(&config).await.unwrap();
+    let mut stream = broker.jetstream.get_stream(name).await.unwrap();
+    let mut config = stream.info().await.unwrap().config.clone();
+    let held = i64::try_from(stream.cached_info().state.messages).unwrap();
+    (config.max_messages, config.discard) = if refuse {
+        (held.max(1), DiscardPolicy::New)
+    } else {
+        (-1, DiscardPolicy::Old)
     };
-    set(1, DiscardPolicy::New).await;
+    broker.jetstream.update_stream(&config).await.unwrap();
+}
+
+/// With one relay running, has `live` refuse every message, and requires
+/// the main stream to publish while the relay counts `live`'s failures.
+async fn refuse_for_a_while(pool: &PgPool, broker: &Broker, committed: &Committed) {
+    refusing(broker, true).await;
     let before = broker.messages().await.len();
+    for key in ["live", ""] {
+        let mut tx = pool.begin().await.unwrap();
+        let id = if key.is_empty() {
+            let event = Shipped {
+                store: "refused".to_owned(),
+                n: 0,
+            };
+            crate::emit(&mut tx, &event).await.unwrap()
+        } else {
+            let event = Seen {
+                store: "refused".to_owned(),
+                n: 0,
+            };
+            crate::emit(&mut tx, &event).await.unwrap()
+        };
+        tx.commit().await.unwrap();
+        committed.lock().unwrap().push(vec![(key, id)]);
+    }
     until("the main stream publishes while `live` refuses", || async {
         broker.messages().await.len() > before
             && count(
@@ -162,7 +187,7 @@ async fn refuse_for_a_while(pool: &PgPool, broker: &Broker) {
                 > 0
     })
     .await;
-    set(-1, DiscardPolicy::Old).await;
+    refusing(broker, false).await;
 }
 
 /// Has a message of `live` wait for an acknowledgement that does not come —
@@ -229,11 +254,13 @@ async fn walk(pool: &PgPool, seed: u64) {
     let writers = futures_join(writers.collect());
     let faulty = Faulty::new(broker.jetstream.clone());
     let killer = kill(pool.clone(), &broker, &faulty, seed, writing.clone());
-    // The relays keep starting and ending until the writers are done and
-    // `live` took messages again.
+    // `live` refuses everything while the relays start and end under the
+    // writers; nothing is asked of them but to lose nothing.
+    refusing(&broker, true).await;
     let ((), ended) = tokio::join!(
         async {
-            tokio::join!(writers, refuse_for_a_while(pool, &broker));
+            writers.await;
+            refusing(&broker, false).await;
             *writing.lock().unwrap() = false;
         },
         killer
@@ -248,6 +275,10 @@ async fn walk(pool: &PgPool, seed: u64) {
     .await
     .unwrap();
     let drained = || async { count(pool, "SELECT count(*) FROM magic_events.outbox").await == 0 };
+    until("the outbox drained", drained).await;
+    // With a relay that stays, each stream's lane on its own: the main stream
+    // publishes while `live` refuses, and while it does not answer.
+    refuse_for_a_while(pool, &broker, &committed).await;
     until("the outbox drained", drained).await;
     stall_for_a_while(pool, &broker, &faulty, &committed).await;
     until("the outbox drained", drained).await;
