@@ -113,7 +113,11 @@ still takes its events, and the status lists it as declared by no one.
 Nothing drops its rows but `Events::retire(key, true)`, which takes the
 stream away — its relay row with it, so `emit` refuses its events —
 refusing while a relay declares it, and refusing its waiting rows unless
-told to drop them.
+told to drop them. A writer whose transaction read the stream's relay row
+before the retirement and commits after it still writes its event, which
+waits with no relay row; the status lists the stream with it, and retiring
+again clears it — or retire once every writer runs settings that no longer
+declare the stream.
 
 ## The relay
 

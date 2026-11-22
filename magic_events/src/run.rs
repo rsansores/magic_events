@@ -346,6 +346,12 @@ impl Events {
     /// publishes — are refused, unless `drop_waiting`: then they are deleted
     /// with it, never published. Answers how many were.
     ///
+    /// A writer whose transaction read the stream's relay row before the
+    /// retirement, and commits after it, still writes its event: it waits
+    /// with no relay row, nothing publishes it, and the status lists the
+    /// stream with it. Retiring again clears it — or retire once every
+    /// writer runs settings that no longer declare the stream.
+    ///
     /// # Errors
     ///
     /// [`Error::Misuse`] for the main stream, a stream these settings or the
