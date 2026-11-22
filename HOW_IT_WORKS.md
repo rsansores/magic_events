@@ -15,7 +15,7 @@ The schema `magic_events` (`magic_events/sql/postgres/`, one file a step):
 |---|---|
 | `version` | one row: the schema's version. `Events::start` refuses another. |
 | `outbox` | the events committed and not published yet, one row each, in emit order (`id`, a `bigserial`). A `TRUNCATE` is refused: it would drop committed events with no trace. |
-| `relay` | one row per stream (`stream`, its key: empty for the main one): how its relay is doing (`last_published_at`, `failures`, `last_error`, `retry_after`), and `max_body`, the largest body `emit` takes for it. `Events::start` writes a row for every stream it declares. |
+| `relay` | one row per stream (`stream`, its key: empty for the main one): how its relay is doing (`last_published_at`, `failures`, `last_error`, `retry_after`), and what the leading relay declared it as — its JetStream stream (`name`), its `subject_prefix`, and `max_body`, the largest body `emit` takes for it — and whether that relay declares it (`declared`). A relay writes them for its streams as it takes the lock. |
 | `published` | messages published, per stream, day (UTC) and type: the outbox forgets what it published, these count it. The relay forgets days older than 90; the status reads the last 30. |
 
 An outbox row holds the event's id (`event_id`, a UUIDv7: its `ce-id` and
@@ -23,7 +23,8 @@ its `Nats-Msg-Id`), the key of its stream (`stream`), its subject after the
 prefix, its type with the version
 (`order.shipped.v1`), the headers `emit` rendered (`ce-type`, and
 `ce-subject` when there is one), the body, when it was emitted
-(`clock_timestamp()`, its `ce-time`), and — for a message the broker
+(`occurred_at`, the writing transaction's `clock_timestamp()`: its
+`ce-time`), and — for a message the broker
 refuses — how often, why, and when it was set aside (`parked_at`). A
 partial index on `(stream, id)` where `parked_at IS NULL` is what the relay
 reads, a stream at a time, and one where it is not is what the status lists
@@ -35,13 +36,23 @@ The tables change only by a new step (`sql/postgres/<n>.sql`), never by
 editing one that was released: `migration(n)` is that step as a script that
 also records its version, and `Events::install` runs the steps a database
 lacks, in one transaction, under an advisory lock so two processes
-installing at once take turns.
+installing at once take turns. Writers write while a step runs, so a step
+first locks what it changes, in the order `emit` takes it — `relay`, then
+`outbox` — and the rest after: a writer in the middle of an `emit` finishes
+before the step, or waits for it, and the two never deadlock. Writes wait
+for as long as the step runs.
 
 Step 2 made one stream several: it added `stream` to the outbox, the relay
 row and the counts, every row there already the main stream's (the empty
-key), and kept `id = 1` on the main stream's relay row, which a writer of a
-build before it reads — so such a writer, still running while the step
-runs, goes on writing to the main stream.
+key). It kept `id = 1` on the main stream's relay row, which a writer of a
+build before it reads, and gave `stream` the main stream as its default —
+so such a writer, still running while the step runs, goes on writing to the
+main stream. A later step drops that default once no such writer can be
+left. And it renamed `emitted_at`, which a writer leaves to its default and
+only a relay reads, to `occurred_at`: a relay of a build before it, still
+leading, fails its read and publishes nothing — it cannot publish another
+stream's events under the main stream's prefix — until it stops and one of
+this build takes over.
 
 ## `emit`
 
@@ -59,8 +70,8 @@ runs, goes on writing to the main stream.
 4. runs one statement: it reads the `max_body` of the event's stream from
    its relay row (64 KiB when no relay recorded one) and inserts the row
    only if the body fits, answering which — and refuses the event, writing
-   nothing, when its stream has no relay row: no relay ever declared it, so
-   nothing would publish it.
+   nothing, when the leading relay does not declare its stream: nothing
+   would publish it.
 
 No broker, no second round trip: the writer pays one `INSERT`. It does not
 know the subject prefix or the CloudEvents `source`; the relay adds both,
@@ -69,7 +80,7 @@ so a change to either applies to what is still in the outbox.
 ## Streams
 
 An event names its stream by a key (`#[event(stream = "live")]`), or none:
-the main stream. `Settings::new` names the main stream's JetStream stream;
+the main stream. `Settings::new` takes the main stream's settings;
 `Settings::stream(key, …)` declares another, with its own name, subject
 prefix, retention, duplicate window, storage, replicas, `max_body` and
 `manage_stream`. What is the relay's — the source, the waits, the batch, the
@@ -78,15 +89,31 @@ twice, two keys of one JetStream stream, and two subject prefixes one of
 which takes the other's subjects (`shop` and `shop.live`): a stream would
 hold another's events, and a subject filter would not say whose it is.
 
+Which streams are published is the leader's to say: as it takes the lock,
+it writes, fenced, a relay row for each stream its settings declare — the
+JetStream name, the prefix, the `max_body` — marks every other stream
+undeclared, and runs a lane for each of its own. `emit` takes an event only
+for a stream the leader declares. A process that starts while another
+leads refuses settings that declare a stream otherwise than the leader
+does — another JetStream stream, another prefix — since two relays would
+publish its events to two places; with no relay leading, the one that
+starts declares its streams as its probe holds the lock.
+
+A stream no relay declares any more has no lane: its rows wait, and the
+status lists it as declared by no one; `emit` refuses its events. Nothing
+drops its rows but `Events::retire(key, true)`, which takes the stream
+away, refusing while a relay declares it, and refusing its waiting rows
+unless told to drop them.
+
 ## The relay
 
 `Events::start` checks the settings, the schema's version, and that each
 stream's `max_body` with 4 KiB of headers fits the broker's `max_payload`;
 creates each stream or brings it to its settings (or, with
 `manage_stream(false)`, checks that it takes every subject under its
-prefix); writes each stream's relay row with its `max_body` for `emit` —
-every process that starts records its own, the last one counts; and spawns
-the relay in a task of its own.
+prefix); probes the lock — declaring the streams if it gets it, checking
+that it agrees with the leader if not; and spawns the relay in a task of
+its own.
 
 ### One at a time
 
@@ -103,7 +130,8 @@ without saying so: TCP keepalives after 10 s of silence, every 5 s, three
 missed; anything sent and unacknowledged for 20 s; a statement running past
 30 s cancelled; and the client looked for every 5 s while one runs. With
 `Settings::role`, the session sets that role too (`SET ROLE`), and every
-transaction of the crate's own outside it — start's checks, status, unpark —
+transaction of the crate's own outside it — start's checks, a pass's read,
+status, unpark, retire —
 sets it for itself (`SET LOCAL ROLE`), so the connection goes back to the
 pool as it came. So a
 leader whose network dies — a partition, a frozen machine — loses its lock
@@ -111,8 +139,8 @@ within about 30 seconds, not the hours the defaults take. On its side, every
 statement the relay sends is bounded by the same 30 s: a database that
 stops answering is taken for away, the lock let go, and the relay stands by.
 
-Each pass opens its transactions on the lock's own connection, and checks,
-inside each, that the server process it runs on holds the lock
+A pass settles in a transaction on the lock's own connection, and checks,
+inside it, that the server process it runs on holds the lock
 (`pg_locks` for `pg_backend_pid()`). That is the fence: a relay that lost
 its lock — its connection killed while it was publishing — commits nothing,
 so it can never delete rows a new leader is publishing. It also catches a
@@ -125,37 +153,42 @@ the fence fails; a relay that meets it later publishes nothing and says why.
 
 The leader runs a lane for each stream it declares: a loop of that stream's
 passes, with its own backoff, its own failures in its relay row, and its own
-idle wait. The lanes run side by side — futures of the relay's one task —
-and share the lock's connection, taking turns on it for their statements;
-everything else, the publishing and the waiting for acknowledgements, each
-does on its own.
+idle wait. The lanes run side by side — futures of the relay's one task.
+A lane reads its stream's rows through the pool, and takes a turn on the
+lock's connection only to settle a pass; the publishing and the waiting for
+acknowledgements, each does on its own.
 
 Side by side, not one after the other: a pass waits for its stream's
 acknowledgements, up to `send_timeout` (10 s) when the stream's leader does
 not answer, and passes taken in turn would make every other stream wait as
 long, every backoff, for as long as that stream is away. Side by side, a
-stream that fails costs the others only the turns its statements take on
-the connection — each bounded by the database's 30 s, as every statement
-of the relay's is. And futures of one task, not tasks of their own: the
-relay starts, stops and dies as one — a lane cannot outlive the lock, nor
-the `Events` that ran it.
+stream that fails costs the others only its turns on the lock's connection,
+to settle — each bounded by the database's 30 s, as every statement of the
+relay's is. And futures of one task, not tasks of their own: the relay
+starts, stops and dies as one — a lane cannot outlive the lock, nor the
+`Events` that ran it.
 
-At the top of every pass a lane checks the lock is still there; the first
-to find it gone ends every lane, and the relay stands by again.
-`Events::stop` is seen between passes, never inside one: each lane finishes
-the pass under way — what it published deleted — and the lock is let go at
-once, so a deploy sends nothing twice and the next relay waits for no
-keepalive. Once an hour, beside the lanes, the leader forgets the counts
-older than 90 days.
+The read needs no fence: a relay that lost its lock may read and publish,
+and cannot settle — the rows stay, and the next relay's messages, sent
+again under the same ids, are dropped by the stream. So the cost of a
+stream that has nothing waiting is one indexed read, through the pool,
+every `idle` (200 ms); a pass that published adds one fenced transaction
+on the lock's connection. Ten idle streams are fifty reads a second, and
+the lock's connection stays as idle as with one.
 
-A stream declared once and no longer has no lane: its rows wait, its relay
-row stays — so `emit` still takes its events — and the status lists it as
-declared by no one. Nothing drops them.
+Beside the lanes, the leader asks every `idle` whether its lock is still
+there; when it is gone, every lane ends after the pass it is in, and the
+relay stands by again. `Events::stop` is seen between passes, never inside
+one: each lane finishes the pass under way — what it published deleted —
+and the lock is let go at once, so a deploy sends nothing twice and the
+next relay waits for no keepalive. A relay stopped as it loses its lock
+stops, and does not stand by. Once an hour, beside the lanes, the leader
+forgets the counts older than 90 days.
 
 ### A pass
 
-1. **Read**, fenced: up to `batch` of the stream's rows `WHERE stream = $1
-   AND parked_at IS NULL ORDER BY id`.
+1. **Read**, through the pool: up to `batch` of the stream's rows
+   `WHERE stream = $1 AND parked_at IS NULL ORDER BY id`.
 2. **Publish**, with no transaction open: each row's message — the subject
    under the stream's prefix, the CloudEvents headers, `Nats-Msg-Id` —
    handed to JetStream, up to `in_flight` sent and not acknowledged yet, the
@@ -202,14 +235,20 @@ remembers a position to skip past them; the relay reads what is there.
 | The stream took a message, and the row was not deleted — the relay died, or the acknowledgement was lost — and it is sent again only after `duplicate_window` | Published again, and this time kept: a duplicate, with the same `ce-id`. | Consumers deduplicate by `ce-id`. |
 | A message is parked | The rest of its transaction's events go out before it; it follows them once unparked. | Consumers do not rely on order (a re-read does not need it). |
 | No process runs the relay | Events wait in the outbox; the status says no relay runs. | Starting one. |
-| A stream is no longer declared | Its rows wait, nothing publishes them; `emit` still takes its events; the status of every subject lists it as declared by no one. | Declaring it again, or deleting its rows. |
-| An event names a stream no relay ever declared | `emit` refuses it, and writes nothing. | Declaring the stream, and starting a relay. |
+| A stream is no longer declared by the leading relay | Its rows wait, nothing publishes them; `emit` refuses its events; the status of every subject lists it as declared by no one. | Declaring it again, or `Events::retire`. |
+| An event names a stream the leading relay does not declare — none ever did, or a relay of older settings leads | `emit` refuses it, and writes nothing. | A relay that declares the stream leading. |
+| A process starts declaring a stream otherwise than the leading relay | `Events::start` refuses it, naming both. | The same settings everywhere; to change a stream's name or prefix, every relay stopped first. |
+| A relay of 0.1 still leads after step 2 | Its reads fail: it publishes nothing, and holds the lock until it stops. | Stopping it: a relay of this build takes over within `standby`. |
+| The relay is stopped as it loses its lock | It stops. | — |
 | A consumer is away | The stream keeps its messages for `retention`; the consumer's lag grows in the status. | The consumer coming back within `retention`. |
 
 ## The status
 
 `Events::status` answers one stream: the one `Filter::stream` names, the
-one whose prefix `Filter::subject` is under, or the main one. It reads the
+one whose prefix `Filter::subject` is under, or the main one
+(`Filter::main`). A stream these settings declare and no relay has yet —
+another leads, with older settings — answers with nothing published and
+nothing failed. It reads the
 database in one `REPEATABLE READ` snapshot — the stream's outbox under the
 filter (a NATS subject filter, turned into a regular expression on each
 row's full subject), its parked rows, its relay row, whether any process

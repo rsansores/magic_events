@@ -65,18 +65,19 @@ browser's clock.
 
 ### Views and what they show
 
-A status for `Filter::all()` — an operator's view — carries the consumers
-and the counts of what was published. A status for a narrower filter (one
-store's subjects, say) leaves both out, and the dashboard leaves out their
-sections: a consumer's lag is the whole stream's, and the counts are kept
+A status for `Filter::main()` — an operator's view of the main stream —
+carries the consumers and the counts of what was published. A status for a
+narrower filter (one store's subjects, say) leaves both out, and the
+dashboard leaves out their sections: a consumer's lag is the whole stream's, and the counts are kept
 by type alone, so neither can be narrowed by subject.
 
-A status is of one stream: the main one for `Filter::all()`, another for
+A status is of one stream: the main one for `Filter::main()`, another for
 `Filter::stream("live")`. A host with several shows a dashboard per stream.
 An operator's view of any of them also lists every stream of the outbox —
 what waits for each, and its failed passes — as a table when there are
-several, and is **stuck** while events wait for a stream no relay declares
-any more, since no dashboard of that stream will say so.
+several, and is **stuck** while events wait for a stream the leading relay
+does not declare, since no dashboard of that stream will say so. It reads
+answers of contract 2, which 0.2 of the crate serializes.
 
 ### Its look
 

@@ -110,7 +110,10 @@ cargo +nightly-2026-10-10 public-api -p magic_events --all-features -s > magic_e
 The crate's schema is a list of steps (`MIGRATIONS` in `src/schema.rs`), one
 per `SCHEMA_VERSION`. A released step is never edited: a change is a new
 step, the version raised by one, and a test that upgrades a database of the
-version before it. The changelog says so, and names the step for hosts with
+version before it. Writers write while a step runs, so a step first locks
+every table it changes, in the order `emit` takes them — `relay`, then
+`outbox` — and the others after; taken in another order, a step deadlocks
+with a writer in the middle of an `emit`. The changelog says so, and names the step for hosts with
 migrations of their own.
 
 ## A change to the messages
