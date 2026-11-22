@@ -5,7 +5,7 @@
 
 use crate::envelope::Message;
 use crate::publish::{Ack, Boxed, Failure, Publish};
-use crate::{Events, Settings, Storage};
+use crate::{Event, Events, Settings, Storage, StreamSettings};
 use async_nats::jetstream::Context;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -42,17 +42,43 @@ pub(crate) fn shipped(store: &str, n: u64) -> Shipped {
     }
 }
 
-/// A stream of a test's own, in memory, and settings that wait milliseconds
-/// where a host's wait seconds.
+/// An event of the tests on the stream `live`, which [`Broker::live`]
+/// declares: `poison` in its subject has `Faulty` refuse it too.
+#[derive(Serialize, serde::Deserialize, Debug, PartialEq, crate::Event)]
+#[event(
+    type = "order.seen",
+    version = 1,
+    subject = "orders.{store}.seen",
+    stream = "live"
+)]
+pub(crate) struct Seen {
+    pub(crate) store: String,
+    pub(crate) n: u64,
+}
+
+pub(crate) fn seen(store: &str, n: u64) -> Seen {
+    Seen {
+        store: store.to_owned(),
+        n,
+    }
+}
+
+/// The streams of a test's own, in memory, and settings that wait
+/// milliseconds where a host's wait seconds.
 pub(crate) struct Broker {
     pub(crate) jetstream: Context,
     pub(crate) settings: Settings,
 }
 
+/// A stream name of a test's own.
+fn named() -> String {
+    format!("T{}", Uuid::now_v7().simple())
+}
+
 impl Broker {
+    /// The main stream alone.
     pub(crate) async fn new() -> Broker {
-        let name = format!("T{}", Uuid::now_v7().simple());
-        let settings = Settings::new(&name, "//tests")
+        let settings = Settings::new(named(), "//tests")
             .storage(Storage::Memory)
             .idle(Duration::from_millis(10))
             .standby(Duration::from_millis(10))
@@ -64,10 +90,31 @@ impl Broker {
         }
     }
 
-    /// Every message the stream holds, in order: its subject, its headers by
-    /// name, and its body.
+    /// The main stream, and the stream `live` of a test's own.
+    pub(crate) async fn live() -> Broker {
+        let mut broker = Broker::new().await;
+        broker.settings = broker.settings.stream(
+            "live",
+            StreamSettings::new(named()).storage(Storage::Memory),
+        );
+        broker
+    }
+
+    /// The settings of the stream `key`: empty for the main one.
+    pub(crate) fn stream(&self, key: &str) -> &StreamSettings {
+        self.settings.find(key).expect("a stream declared").stream
+    }
+
+    /// Every message the main stream holds, in order: its subject, its
+    /// headers by name, and its body.
     pub(crate) async fn messages(&self) -> Vec<Received> {
-        let Ok(mut stream) = self.jetstream.get_stream(&self.settings.stream).await else {
+        self.messages_of("").await
+    }
+
+    /// Every message the stream `key` holds, in order.
+    pub(crate) async fn messages_of(&self, key: &str) -> Vec<Received> {
+        let name = &self.stream(key).name;
+        let Ok(mut stream) = self.jetstream.get_stream(name).await else {
             return Vec::new();
         };
         let info = stream.info().await.unwrap().state.clone();
@@ -95,14 +142,25 @@ impl Broker {
         out
     }
 
-    /// The bodies the stream holds, in order.
+    /// The bodies the main stream holds, in order.
     pub(crate) async fn bodies(&self) -> Vec<String> {
-        self.messages().await.into_iter().map(|m| m.body).collect()
+        self.bodies_of("").await
     }
 
-    /// Deletes the test's stream.
+    /// The bodies the stream `key` holds, in order.
+    pub(crate) async fn bodies_of(&self, key: &str) -> Vec<String> {
+        self.messages_of(key)
+            .await
+            .into_iter()
+            .map(|m| m.body)
+            .collect()
+    }
+
+    /// Deletes the test's streams.
     pub(crate) async fn done(self) {
-        let _ = self.jetstream.delete_stream(&self.settings.stream).await;
+        for declared in self.settings.declared() {
+            let _ = self.jetstream.delete_stream(&declared.stream.name).await;
+        }
     }
 }
 
@@ -132,8 +190,9 @@ pub(crate) enum Mode {
     Unacked,
 }
 
-/// JetStream, failing as a test says: `Mode`, and a refusal for good of a
-/// message whose subject holds `poison` while `refusing` is set.
+/// JetStream, failing as a test says: `Mode`, a refusal for good of a
+/// message whose subject holds `poison` while `refusing` is set, and no
+/// acknowledgement ever of one whose subject holds `stall`.
 #[derive(Clone)]
 pub(crate) struct Faulty {
     pub(crate) jetstream: Context,
@@ -168,6 +227,10 @@ impl Publish for Faulty {
                     reason: "a message the stream refuses".to_owned(),
                 });
             }
+            if message.subject.contains("stall") {
+                let never: Ack = Box::pin(std::future::pending());
+                return Ok(never);
+            }
             let mode = *self.mode.lock().unwrap();
             match mode {
                 Mode::Down => Err(Failure::transient("the broker is away")),
@@ -188,12 +251,14 @@ impl Publish for Faulty {
 }
 
 /// The schema installed, and `Events` over `publish` with the broker's
-/// settings, its stream created — not running: the test runs each pass.
+/// settings, its streams created — not running: the test runs each pass.
 pub(crate) async fn idle(pool: &PgPool, broker: &Broker, publish: Arc<dyn Publish>) -> Events {
     Events::install(pool).await.unwrap();
-    crate::stream::ensure(&broker.jetstream, &broker.settings)
-        .await
-        .unwrap();
+    for declared in broker.settings.declared() {
+        crate::stream::ensure(&broker.jetstream, declared.stream)
+            .await
+            .unwrap();
+    }
     let relay = Events::prepare(pool.clone(), publish, broker.settings.clone())
         .await
         .unwrap();
@@ -202,7 +267,7 @@ pub(crate) async fn idle(pool: &PgPool, broker: &Broker, publish: Arc<dyn Publis
 }
 
 /// Emits each of `events` in a transaction of its own.
-pub(crate) async fn emit_each(pool: &PgPool, events: &[Shipped]) {
+pub(crate) async fn emit_each<E: Event>(pool: &PgPool, events: &[E]) {
     for event in events {
         let mut tx = pool.begin().await.unwrap();
         crate::emit(&mut tx, event).await.unwrap();

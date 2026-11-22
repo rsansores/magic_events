@@ -1,5 +1,6 @@
 //! How the relay runs, and the stream it publishes to.
 
+use crate::stream::covers;
 use crate::Error;
 use std::time::Duration;
 
@@ -27,6 +28,9 @@ pub(crate) const LONGEST_PREFIX: usize = 255;
 /// a type to it.
 pub(crate) const LONGEST_TYPE: usize = 255;
 
+/// The longest stream key, in bytes: the derive holds a key to it.
+pub(crate) const LONGEST_KEY: usize = 32;
+
 /// Where the stream keeps its messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -37,68 +41,45 @@ pub enum Storage {
     Memory,
 }
 
-/// How the relay runs, and the stream it publishes to. [`Settings::new`]
-/// names the stream and the events' source; everything else has a default
-/// and a setter.
+/// One JetStream stream the relay publishes to: its name, its subject
+/// prefix, and what it keeps. [`Settings::new`] names the main stream, and
+/// its setters set it; [`Settings::stream`] declares another with these.
 ///
 /// ```
-/// use magic_events::Settings;
+/// use magic_events::StreamSettings;
 /// use std::time::Duration;
 ///
-/// let settings = Settings::new("SHOP_EVENTS", "shop")
-///     .retention(Duration::from_secs(30 * 24 * 60 * 60))
-///     .replicas(3);
+/// let live = StreamSettings::new("SHOP_LIVE").retention(Duration::from_secs(10 * 60));
 /// ```
 #[derive(Clone, Debug)]
-pub struct Settings {
-    pub(crate) stream: String,
-    pub(crate) source: String,
+pub struct StreamSettings {
+    pub(crate) name: String,
     pub(crate) subject_prefix: String,
     pub(crate) retention: Duration,
     pub(crate) duplicate_window: Duration,
     pub(crate) storage: Storage,
     pub(crate) replicas: usize,
     pub(crate) manage_stream: bool,
-    pub(crate) idle: Duration,
-    pub(crate) batch: u32,
-    pub(crate) in_flight: u32,
-    pub(crate) send_timeout: Duration,
-    pub(crate) backoff: (Duration, Duration),
-    pub(crate) standby: Duration,
     pub(crate) max_body: u32,
-    pub(crate) role: Option<String>,
-    /// How long a statement of the relay's may take before the relay counts
-    /// the database as away, lets go of its lock and stands by.
-    pub(crate) database_timeout: Duration,
 }
 
-impl Settings {
-    /// The relay of the JetStream stream `stream`, its events' CloudEvents
-    /// `source` the URI-reference `source` (`"shop"`,
-    /// `"//shop.example.com"`). Every subject is the subject prefix — the
-    /// stream's name in lowercase, unless [`Settings::subject_prefix`] says
-    /// otherwise — then a dot, then the event's own subject.
+impl StreamSettings {
+    /// The JetStream stream `name`. Every subject is the subject prefix —
+    /// the stream's name in lowercase, unless
+    /// [`StreamSettings::subject_prefix`] says otherwise — then a dot, then
+    /// the event's own subject.
     #[must_use]
-    pub fn new(stream: impl Into<String>, source: impl Into<String>) -> Self {
-        let stream = stream.into();
-        Settings {
-            subject_prefix: stream.to_lowercase(),
-            stream,
-            source: source.into(),
+    pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        StreamSettings {
+            subject_prefix: name.to_lowercase(),
+            name,
             retention: Duration::from_secs(7 * 24 * 60 * 60),
             duplicate_window: Duration::from_secs(2 * 60),
             storage: Storage::File,
             replicas: 1,
             manage_stream: true,
-            idle: Duration::from_millis(200),
-            batch: 256,
-            in_flight: 64,
-            send_timeout: Duration::from_secs(10),
-            backoff: (Duration::from_millis(500), Duration::from_secs(60)),
-            standby: Duration::from_secs(30),
             max_body: MAX_BODY,
-            role: None,
-            database_timeout: Duration::from_secs(30),
         }
     }
 
@@ -153,6 +134,209 @@ impl Settings {
         self
     }
 
+    /// The largest body, in bytes, [`emit`](crate::emit) takes for an event
+    /// of this stream: 64 KiB by default. Held to the broker's `max_payload`
+    /// when the relay starts.
+    #[must_use]
+    pub fn max_body(mut self, bytes: u32) -> Self {
+        self.max_body = bytes;
+        self
+    }
+
+    /// Refuses a stream the relay cannot publish to, each refusal led by
+    /// `of` — nothing for the main stream, "the stream `live`: " for another
+    /// — and its `duplicate_window` shorter than `takeover`, what a takeover
+    /// of the relay may take.
+    fn check(&self, of: &str, takeover: Duration) -> Result<(), Error> {
+        let misuse = |why: String| Err(Error::Misuse(format!("{of}{why}")));
+        if self.name.is_empty()
+            || !self
+                .name
+                .chars()
+                .all(|c| matches!(c, '!'..='~') && !matches!(c, '.' | '*' | '>' | '/' | '\\'))
+        {
+            return misuse(format!(
+                "`{}` is no stream name: one is printable ASCII, with no whitespace, and none of \
+                 `.`, `*`, `>`, `/` or `\\`",
+                self.name
+            ));
+        }
+        if self.subject_prefix.len() > LONGEST_PREFIX
+            || self.subject_prefix.split('.').any(|t| !is_token(t))
+        {
+            return misuse(format!(
+                "`{}` is no subject prefix: one is one token or several, joined by dots, each \
+                 printable ASCII with no `*` or `>`",
+                self.subject_prefix
+            ));
+        }
+        let zero = [
+            ("retention", self.retention),
+            ("duplicate_window", self.duplicate_window),
+        ];
+        if let Some((what, _)) = zero.iter().find(|(_, d)| d.is_zero()) {
+            return misuse(format!(
+                "`{what}` is zero: the stream would keep nothing, or drop nothing sent twice"
+            ));
+        }
+        if self.duplicate_window > self.retention {
+            return misuse(format!(
+                "`duplicate_window` ({:?}) is longer than `retention` ({:?}): the stream refuses it",
+                self.duplicate_window, self.retention
+            ));
+        }
+        if self.duplicate_window < takeover {
+            return misuse(format!(
+                "`duplicate_window` ({:?}) is shorter than a takeover may take — `standby`, the \
+                 database's 30 s and `send_timeout`, {takeover:?}: a message sent again after it \
+                 would be kept twice",
+                self.duplicate_window
+            ));
+        }
+        if self.max_body == 0 {
+            return misuse("`max_body` is zero: the relay would publish nothing".to_owned());
+        }
+        if self.replicas == 0 {
+            return misuse(
+                "`replicas` is zero: a stream is held by one server at least".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// One stream the settings declare: its key — empty for the main stream —
+/// and its settings.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Declared<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) stream: &'a StreamSettings,
+}
+
+/// How the relay runs, and the streams it publishes to. [`Settings::new`]
+/// names the main stream and the events' source; [`Settings::stream`]
+/// declares another stream; everything else has a default and a setter.
+///
+/// ```
+/// use magic_events::{Settings, StreamSettings};
+/// use std::time::Duration;
+///
+/// let settings = Settings::new("SHOP_EVENTS", "shop")
+///     .retention(Duration::from_secs(30 * 24 * 60 * 60))
+///     .replicas(3)
+///     .stream("live", StreamSettings::new("SHOP_LIVE").retention(Duration::from_secs(600)));
+/// ```
+#[derive(Clone, Debug)]
+pub struct Settings {
+    pub(crate) source: String,
+    /// The main stream: an event that names no stream goes there.
+    pub(crate) main: StreamSettings,
+    /// Every other stream, by key, as declared.
+    pub(crate) others: Vec<(String, StreamSettings)>,
+    pub(crate) idle: Duration,
+    pub(crate) batch: u32,
+    pub(crate) in_flight: u32,
+    pub(crate) send_timeout: Duration,
+    pub(crate) backoff: (Duration, Duration),
+    pub(crate) standby: Duration,
+    pub(crate) role: Option<String>,
+    /// How long a statement of the relay's may take before the relay counts
+    /// the database as away, lets go of its lock and stands by.
+    pub(crate) database_timeout: Duration,
+}
+
+impl Settings {
+    /// The relay of the main JetStream stream `stream`, its events'
+    /// CloudEvents `source` the URI-reference `source` (`"shop"`,
+    /// `"//shop.example.com"`). Every subject is the subject prefix — the
+    /// stream's name in lowercase, unless [`Settings::subject_prefix`] says
+    /// otherwise — then a dot, then the event's own subject. An event goes
+    /// to the main stream unless it names another (`#[event(stream = …)]`).
+    #[must_use]
+    pub fn new(stream: impl Into<String>, source: impl Into<String>) -> Self {
+        Settings {
+            source: source.into(),
+            main: StreamSettings::new(stream),
+            others: Vec::new(),
+            idle: Duration::from_millis(200),
+            batch: 256,
+            in_flight: 64,
+            send_timeout: Duration::from_secs(10),
+            backoff: (Duration::from_millis(500), Duration::from_secs(60)),
+            standby: Duration::from_secs(30),
+            role: None,
+            database_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Declares the stream `key` — what an event's `#[event(stream = …)]`
+    /// names — as `stream`: a JetStream stream of its own, with its own
+    /// subject prefix, retention and `max_body`, its own passes and its own
+    /// backoff, so a stream the broker fails holds back no other. One relay
+    /// publishes every stream declared. A key is lowercase ASCII letters,
+    /// digits and `_`, starting with a letter; [`Events::start`] refuses a
+    /// key declared twice, two keys of one stream name, and subject prefixes
+    /// one of which takes another's subjects.
+    ///
+    /// [`Events::start`]: crate::Events::start
+    #[must_use]
+    pub fn stream(mut self, key: impl Into<String>, stream: StreamSettings) -> Self {
+        self.others.push((key.into(), stream));
+        self
+    }
+
+    /// The main stream's first subject tokens: one token or several, joined
+    /// by dots (`"shop.events"`). The lowercase stream name by default.
+    #[must_use]
+    pub fn subject_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.main = self.main.subject_prefix(prefix);
+        self
+    }
+
+    /// How long the main stream keeps a message (its `max_age`): 7 days by
+    /// default. A consumer that is away longer misses what expired.
+    #[must_use]
+    pub fn retention(mut self, retention: Duration) -> Self {
+        self.main = self.main.retention(retention);
+        self
+    }
+
+    /// How long the main stream remembers a message's id, and drops a
+    /// message sent again under it: 2 minutes by default. A relay that died
+    /// after the stream took a message, and before it deleted its row, sends
+    /// it again; within the window that is no duplicate.
+    #[must_use]
+    pub fn duplicate_window(mut self, window: Duration) -> Self {
+        self.main = self.main.duplicate_window(window);
+        self
+    }
+
+    /// Where the main stream keeps its messages: [`Storage::File`] by
+    /// default. Set when the stream is created; a stream's storage does not
+    /// change.
+    #[must_use]
+    pub fn storage(mut self, storage: Storage) -> Self {
+        self.main = self.main.storage(storage);
+        self
+    }
+
+    /// How many servers of the cluster hold the main stream: 1 by default.
+    #[must_use]
+    pub fn replicas(mut self, replicas: usize) -> Self {
+        self.main = self.main.replicas(replicas);
+        self
+    }
+
+    /// Whether the relay creates the main stream, and brings it to these
+    /// settings (`true`, the default), or only requires that it exists and
+    /// takes every subject under the prefix (`false`): the stream is then
+    /// the operator's, with its own retention.
+    #[must_use]
+    pub fn manage_stream(mut self, manage: bool) -> Self {
+        self.main = self.main.manage_stream(manage);
+        self
+    }
+
     /// How long the relay waits when the outbox is empty: 200 ms by default.
     #[must_use]
     pub fn idle(mut self, idle: Duration) -> Self {
@@ -167,9 +351,9 @@ impl Settings {
         self
     }
 
-    /// Messages sent and not acknowledged yet, at most: 64 by default. 1
-    /// sends one message at a time, each after the one before it was
-    /// acknowledged.
+    /// Messages sent and not acknowledged yet, at most, per stream: 64 by
+    /// default. 1 sends one message at a time, each after the one before it
+    /// was acknowledged.
     #[must_use]
     pub fn in_flight(mut self, in_flight: u32) -> Self {
         self.in_flight = in_flight;
@@ -184,8 +368,9 @@ impl Settings {
         self
     }
 
-    /// How long the relay waits after a failed pass: `first`, doubling with
-    /// every failure in a row, up to `max`. 500 ms to 60 s by default.
+    /// How long the relay waits after a failed pass of a stream: `first`,
+    /// doubling with every failure of that stream in a row, up to `max`.
+    /// 500 ms to 60 s by default.
     #[must_use]
     pub fn backoff(mut self, first: Duration, max: Duration) -> Self {
         self.backoff = (first, max);
@@ -194,20 +379,21 @@ impl Settings {
 
     /// How often a process that is not the relay asks for the relay's lock:
     /// 30 s by default. With `send_timeout` and 30 s for the server to let a
-    /// dead relay's lock go, within `duplicate_window`: a takeover inside the
-    /// window sends nothing twice, and `start` refuses settings that would not
-    /// fit.
+    /// dead relay's lock go, within every stream's `duplicate_window`: a
+    /// takeover inside the window sends nothing twice, and `start` refuses
+    /// settings that would not fit.
     #[must_use]
     pub fn standby(mut self, standby: Duration) -> Self {
         self.standby = standby;
         self
     }
 
-    /// The largest body, in bytes, [`emit`](crate::emit) takes: 64 KiB by
-    /// default. Held to the broker's `max_payload` when the relay starts.
+    /// The largest body, in bytes, [`emit`](crate::emit) takes for an event
+    /// of the main stream: 64 KiB by default. Held to the broker's
+    /// `max_payload` when the relay starts.
     #[must_use]
     pub fn max_body(mut self, bytes: u32) -> Self {
-        self.max_body = bytes;
+        self.main = self.main.max_body(bytes);
         self
     }
 
@@ -228,21 +414,26 @@ impl Settings {
         self
     }
 
+    /// Every stream declared, the main one first.
+    pub(crate) fn declared(&self) -> impl Iterator<Item = Declared<'_>> {
+        std::iter::once(Declared {
+            key: "",
+            stream: &self.main,
+        })
+        .chain(self.others.iter().map(|(key, stream)| Declared {
+            key: key.as_str(),
+            stream,
+        }))
+    }
+
+    /// The stream `key` declares, if it declares one: empty for the main.
+    pub(crate) fn find(&self, key: &str) -> Option<Declared<'_>> {
+        self.declared().find(|d| d.key == key)
+    }
+
     /// Refuses settings the relay cannot run with.
     pub(crate) fn check(&self) -> Result<(), Error> {
         let misuse = |why: String| Err(Error::Misuse(why));
-        if self.stream.is_empty()
-            || !self
-                .stream
-                .chars()
-                .all(|c| matches!(c, '!'..='~') && !matches!(c, '.' | '*' | '>' | '/' | '\\'))
-        {
-            return misuse(format!(
-                "`{}` is no stream name: one is printable ASCII, with no whitespace, and none of \
-                 `.`, `*`, `>`, `/` or `\\`",
-                self.stream
-            ));
-        }
         if self.role.as_deref() == Some("") {
             return misuse("an empty role: name one, or leave the login role's".to_owned());
         }
@@ -255,18 +446,7 @@ impl Settings {
                 "a source of {source} bytes as a header: it is 1 KiB at most"
             ));
         }
-        if self.subject_prefix.len() > LONGEST_PREFIX
-            || self.subject_prefix.split('.').any(|t| !is_token(t))
-        {
-            return misuse(format!(
-                "`{}` is no subject prefix: one is one token or several, joined by dots, each \
-                 printable ASCII with no `*` or `>`",
-                self.subject_prefix
-            ));
-        }
         let zero = [
-            ("retention", self.retention),
-            ("duplicate_window", self.duplicate_window),
             ("idle", self.idle),
             ("send_timeout", self.send_timeout),
             ("backoff", self.backoff.0),
@@ -284,11 +464,10 @@ impl Settings {
                 self.backoff.0, self.backoff.1
             ));
         }
-        if self.duplicate_window > self.retention {
-            return misuse(format!(
-                "`duplicate_window` ({:?}) is longer than `retention` ({:?}): the stream refuses it",
-                self.duplicate_window, self.retention
-            ));
+        for (what, n) in [("batch", self.batch), ("in_flight", self.in_flight)] {
+            if n == 0 {
+                return misuse(format!("`{what}` is zero: the relay would publish nothing"));
+            }
         }
         // A relay that died after the stream took a message, and before it
         // deleted the row, is followed by one that sends it again: within
@@ -296,30 +475,80 @@ impl Settings {
         // `standby`, the server letting the dead one's lock go within its
         // own wait, and sends within `send_timeout`.
         let takeover = self.standby + self.database_timeout + self.send_timeout;
-        if self.duplicate_window < takeover {
-            return misuse(format!(
-                "`duplicate_window` ({:?}) is shorter than a takeover may take — `standby`, the \
-                 database's 30 s and `send_timeout`, {takeover:?}: a message sent again after it \
-                 would be kept twice",
-                self.duplicate_window
-            ));
-        }
-        for (what, n) in [
-            ("batch", self.batch),
-            ("in_flight", self.in_flight),
-            ("max_body", self.max_body),
-        ] {
-            if n == 0 {
-                return misuse(format!("`{what}` is zero: the relay would publish nothing"));
+        let declared: Vec<Declared<'_>> = self.declared().collect();
+        for (i, d) in declared.iter().enumerate() {
+            let of = if i == 0 {
+                String::new()
+            } else {
+                if d.key.is_empty() {
+                    return misuse(
+                        "an empty stream key: the main stream is `Settings::new`'s, and another \
+                         stream has a key of its own, as `live`"
+                            .to_owned(),
+                    );
+                }
+                if !is_key(d.key) {
+                    return misuse(format!(
+                        "`{}` is no stream key: one is lowercase ASCII letters, digits and `_`, \
+                         starting with a letter, 32 bytes at most, as `live`",
+                        d.key
+                    ));
+                }
+                format!("the stream `{}`: ", d.key)
+            };
+            d.stream.check(&of, takeover)?;
+            for earlier in &declared[..i] {
+                let (a, b) = (earlier.stream, d.stream);
+                let named = |key: &str| {
+                    if key.is_empty() {
+                        "the main stream".to_owned()
+                    } else {
+                        format!("the stream `{key}`")
+                    }
+                };
+                if earlier.key == d.key {
+                    return misuse(format!(
+                        "the stream `{}` is declared twice: a key names one stream",
+                        d.key
+                    ));
+                }
+                if a.name == b.name {
+                    return misuse(format!(
+                        "{} and {} are both the JetStream stream `{}`: each key is a stream of \
+                         its own",
+                        named(earlier.key),
+                        named(d.key),
+                        b.name
+                    ));
+                }
+                let (wa, wb) = (
+                    format!("{}.>", a.subject_prefix),
+                    format!("{}.>", b.subject_prefix),
+                );
+                if covers(&wa, &wb) || covers(&wb, &wa) {
+                    return misuse(format!(
+                        "the subject prefixes of {} (`{}`) and {} (`{}`) overlap: one takes the \
+                         other's subjects, and a stream would hold another's events",
+                        named(earlier.key),
+                        a.subject_prefix,
+                        named(d.key),
+                        b.subject_prefix
+                    ));
+                }
             }
-        }
-        if self.replicas == 0 {
-            return misuse(
-                "`replicas` is zero: a stream is held by one server at least".to_owned(),
-            );
         }
         Ok(())
     }
+}
+
+/// Whether `key` may name a stream: lowercase ASCII letters, digits and
+/// `_`, starting with a letter, 32 bytes at most.
+pub(crate) fn is_key(key: &str) -> bool {
+    key.len() <= LONGEST_KEY
+        && key.starts_with(|c: char| c.is_ascii_lowercase())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Whether `token` may be one token of a subject: not empty, printable
@@ -338,21 +567,46 @@ mod tests {
     #[test]
     fn the_prefix_is_the_stream_in_lowercase_unless_said() {
         assert_eq!(
-            Settings::new("SHOP_EVENTS", "shop").subject_prefix,
+            Settings::new("SHOP_EVENTS", "shop").main.subject_prefix,
             "shop_events"
         );
         assert_eq!(
             Settings::new("SHOP_EVENTS", "shop")
                 .subject_prefix("shop.events")
+                .main
                 .subject_prefix,
             "shop.events"
         );
+        assert_eq!(StreamSettings::new("SHOP_LIVE").subject_prefix, "shop_live");
         assert!(Settings::new("SHOP_EVENTS", "shop").check().is_ok());
+    }
+
+    #[test]
+    fn every_stream_declared_is_found_by_its_key_the_main_one_first() {
+        let settings = Settings::new("SHOP_EVENTS", "shop")
+            .stream("live", StreamSettings::new("SHOP_LIVE"))
+            .stream("audit", StreamSettings::new("SHOP_AUDIT"));
+        assert!(settings.check().is_ok());
+        let keys: Vec<(&str, &str)> = settings
+            .declared()
+            .map(|d| (d.key, d.stream.name.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("", "SHOP_EVENTS"),
+                ("live", "SHOP_LIVE"),
+                ("audit", "SHOP_AUDIT")
+            ]
+        );
+        assert_eq!(settings.find("live").unwrap().stream.name, "SHOP_LIVE");
+        assert!(settings.find("gone").is_none());
     }
 
     #[test]
     fn settings_the_relay_cannot_run_with_are_refused() {
         let base = || Settings::new("SHOP", "shop");
+        let live = || StreamSettings::new("LIVE");
         for (settings, what) in [
             (Settings::new("SHOP.EVENTS", "shop"), "stream name"),
             (Settings::new("SHOP EVENTS", "shop"), "stream name"),
@@ -382,12 +636,62 @@ mod tests {
             (base().batch(0), "`batch`"),
             (base().max_body(0), "`max_body`"),
             (base().replicas(0), "`replicas`"),
+            (base().stream("Live", live()), "no stream key"),
+            (base().stream("", live()), "an empty stream key"),
+            (base().stream("2live", live()), "no stream key"),
+            (base().stream("x".repeat(33), live()), "no stream key"),
+            (
+                base().stream("live", live().max_body(0)),
+                "the stream `live`: `max_body`",
+            ),
+            (
+                base().stream("live", StreamSettings::new("LIVE STREAM")),
+                "the stream `live`: `LIVE STREAM` is no stream name",
+            ),
+            (
+                base().stream("live", live().retention(Duration::from_secs(60))),
+                "the stream `live`: `duplicate_window`",
+            ),
+            (
+                base()
+                    .stream("live", live())
+                    .stream("live", StreamSettings::new("LIVE2")),
+                "declared twice",
+            ),
+            (
+                base().stream("live", StreamSettings::new("SHOP").subject_prefix("live")),
+                "the main stream and the stream `live` are both the JetStream stream `SHOP`",
+            ),
+            (
+                base().stream("live", live().subject_prefix("shop.live")),
+                "the subject prefixes of the main stream (`shop`) and the stream `live` \
+                 (`shop.live`) overlap",
+            ),
+            (
+                base()
+                    .subject_prefix("shop.events")
+                    .stream("live", live().subject_prefix("shop")),
+                "overlap",
+            ),
+            (
+                base()
+                    .stream("live", live())
+                    .stream("audit", StreamSettings::new("AUDIT").subject_prefix("live")),
+                "the subject prefixes of the stream `live` (`live`) and the stream `audit` \
+                 (`live`) overlap",
+            ),
         ] {
             match settings.check() {
                 Err(Error::Misuse(why)) => assert!(why.contains(what), "{what}: {why}"),
                 other => panic!("{what}: {other:?}"),
             }
         }
+        // Prefixes that share text, and no token, do not overlap.
+        assert!(base()
+            .subject_prefix("shop.events")
+            .stream("live", live().subject_prefix("shop.events_live"))
+            .check()
+            .is_ok());
     }
 
     #[test]
@@ -397,6 +701,25 @@ mod tests {
         }
         for bad in ["", "a.b", "*", ">", "a b", "a\tb", "é", "a\u{7f}"] {
             assert!(!is_token(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_is_a_short_lowercase_identifier() {
+        for good in ["live", "a", "live_2", &"x".repeat(32)] {
+            assert!(is_key(good), "{good}");
+        }
+        for bad in [
+            "",
+            "Live",
+            "2live",
+            "_live",
+            "li-ve",
+            "li.ve",
+            "é",
+            &"x".repeat(33),
+        ] {
+            assert!(!is_key(bad), "{bad:?}");
         }
     }
 }

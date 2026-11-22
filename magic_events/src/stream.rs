@@ -1,15 +1,16 @@
-//! The stream the relay publishes to: created and kept to the settings, or,
-//! when the operator manages it, required to take every subject under the
-//! prefix.
+//! The streams the relay publishes to: each created and kept to its
+//! settings, or, when the operator manages it, required to take every
+//! subject under its prefix.
 
-use crate::settings::{Settings, Storage};
+use crate::settings::{Storage, StreamSettings};
 use crate::Error;
 use async_nats::jetstream::context::{CreateStreamErrorKind, GetStreamErrorKind};
 use async_nats::jetstream::stream::{Config, StorageType};
 use async_nats::jetstream::{Context, ErrorCode};
 
-/// The subjects the relay publishes on: every one under the prefix.
-pub(crate) fn subjects(settings: &Settings) -> String {
+/// The subjects the relay publishes on to a stream: every one under its
+/// prefix.
+pub(crate) fn subjects(settings: &StreamSettings) -> String {
     format!("{}.>", settings.subject_prefix)
 }
 
@@ -22,8 +23,8 @@ fn storage(storage: Storage) -> StorageType {
 
 /// Brings the stream to what `settings` say, or with `manage_stream` off,
 /// refuses one that is not there or does not take the relay's subjects.
-pub(crate) async fn ensure(jetstream: &Context, settings: &Settings) -> Result<(), Error> {
-    let name = &settings.stream;
+pub(crate) async fn ensure(jetstream: &Context, settings: &StreamSettings) -> Result<(), Error> {
+    let name = &settings.name;
     let wanted = subjects(settings);
     let found = match jetstream.get_stream(name).await {
         Ok(stream) => Some(stream.cached_info().config.clone()),

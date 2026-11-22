@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::status::Filter;
-use crate::tests::{count, emit_each, shipped, until, Broker};
-use crate::Storage;
+use crate::tests::{count, emit_each, seen, shipped, until, Broker};
+use crate::{Storage, StreamSettings};
 use std::time::Duration;
 
 /// How many hold an advisory lock on the test's database: the relay's.
@@ -23,7 +23,7 @@ async fn started_it_publishes_what_commits_and_stopped_it_stops(pool: PgPool) {
     )
     .await
     .unwrap();
-    assert!(format!("{events:?}").starts_with("Events { settings: Settings { stream: "));
+    assert!(format!("{events:?}").starts_with("Events { settings: Settings { source: "));
     emit_each(&pool, &[shipped("north", 1), shipped("south", 2)]).await;
     until("both published", || async {
         broker.bodies().await.len() == 2
@@ -162,7 +162,7 @@ async fn the_stream_is_made_and_kept_to_the_settings(pool: PgPool) {
     let config = || async {
         broker
             .jetstream
-            .get_stream(&broker.settings.stream)
+            .get_stream(&broker.settings.main.name)
             .await
             .unwrap()
             .info()
@@ -175,7 +175,7 @@ async fn the_stream_is_made_and_kept_to_the_settings(pool: PgPool) {
         |settings: Settings| Events::start(pool.clone(), broker.jetstream.clone(), settings);
     start(broker.settings.clone()).await.unwrap().stop().await;
     let made = config().await;
-    let prefix = &broker.settings.subject_prefix;
+    let prefix = &broker.settings.main.subject_prefix;
     assert_eq!(made.subjects, [format!("{prefix}.>")]);
     assert_eq!(made.max_age, Duration::from_secs(7 * 24 * 60 * 60));
     assert_eq!(made.duplicate_window, Duration::from_secs(120));
@@ -210,9 +210,9 @@ async fn an_operators_stream_must_take_the_relays_subjects(pool: PgPool) {
         Err(Error::Misuse(why)) => assert!(why.contains("there is no stream"), "{why}"),
         other => panic!("{other:?}"),
     }
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     let mut config = async_nats::jetstream::stream::Config {
-        name: broker.settings.stream.clone(),
+        name: broker.settings.main.name.clone(),
         subjects: vec![format!("{prefix}.orders.>")],
         storage: async_nats::jetstream::stream::StorageType::Memory,
         ..Default::default()
@@ -232,7 +232,7 @@ async fn an_operators_stream_must_take_the_relays_subjects(pool: PgPool) {
     start().await.unwrap().stop().await;
     let after = broker
         .jetstream
-        .get_stream(&broker.settings.stream)
+        .get_stream(&broker.settings.main.name)
         .await
         .unwrap()
         .cached_info()
@@ -353,7 +353,7 @@ async fn drop_role(pool: &PgPool, name: &str) {
 const RELAY_GRANTS: &[&str] = &[
     "USAGE ON SCHEMA magic_events",
     "SELECT, UPDATE, DELETE ON magic_events.outbox",
-    "SELECT, UPDATE ON magic_events.relay",
+    "SELECT, INSERT, UPDATE ON magic_events.relay",
     "SELECT, INSERT, UPDATE ON magic_events.published",
     "SELECT ON magic_events.version",
 ];
@@ -384,7 +384,7 @@ async fn with_a_role_it_runs_on_the_relays_grants_alone(pool: PgPool) {
     .await;
     let status = events.status(&Filter::all()).await.unwrap();
     assert_eq!(status.outbox.pending, 0);
-    assert_eq!(events.unpark_all().await.unwrap(), 0);
+    assert_eq!(events.unpark_all(&Filter::all()).await.unwrap(), 0);
     events.stop().await;
     drop_role(&pool, &relay).await;
     broker.done().await;
@@ -401,7 +401,7 @@ async fn the_relays_session_is_the_roles(pool: PgPool) {
         &[
             "USAGE ON SCHEMA magic_events",
             "SELECT, UPDATE ON magic_events.outbox",
-            "SELECT, UPDATE ON magic_events.relay",
+            "SELECT, INSERT, UPDATE ON magic_events.relay",
             "SELECT, INSERT, UPDATE ON magic_events.published",
             "SELECT ON magic_events.version",
         ],
@@ -481,6 +481,152 @@ async fn a_shared_events_is_stopped_through_a_reference(pool: PgPool) {
             .outbox
             .pending,
         0
+    );
+    broker.done().await;
+}
+
+/// Every stream the settings declare is made as its own settings say, and
+/// recorded for `emit`; the relay publishes each event to its own.
+#[sqlx::test(migrations = false)]
+async fn every_stream_declared_is_made_recorded_and_published_to(pool: PgPool) {
+    let mut broker = Broker::live().await;
+    let live = broker
+        .stream("live")
+        .clone()
+        .retention(Duration::from_secs(600))
+        .max_body(1000);
+    broker.settings.others[0].1 = live.clone();
+    Events::install(&pool).await.unwrap();
+    let events = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone(),
+    )
+    .await
+    .unwrap();
+    let made = broker
+        .jetstream
+        .get_stream(&live.name)
+        .await
+        .unwrap()
+        .cached_info()
+        .config
+        .clone();
+    assert_eq!(made.subjects, [format!("{}.>", live.subject_prefix)]);
+    assert_eq!(made.max_age, Duration::from_secs(600));
+    let recorded: Vec<(String, i32)> =
+        sqlx::query_as("SELECT stream, max_body FROM magic_events.relay ORDER BY stream")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        recorded,
+        [(String::new(), 64 * 1024), ("live".to_owned(), 1000)]
+    );
+
+    emit_each(&pool, &[seen("north", 1)]).await;
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    until("each on its stream", || async {
+        broker.bodies().await.len() == 1 && broker.bodies_of("live").await.len() == 1
+    })
+    .await;
+    events.stop().await;
+    broker.done().await;
+}
+
+/// Streams that would publish over each other are refused at start, before
+/// anything is made.
+#[sqlx::test(migrations = false)]
+async fn streams_that_collide_are_refused_at_start(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    let main = broker.settings.main.clone();
+    for (settings, what) in [
+        (
+            broker
+                .settings
+                .clone()
+                .stream("live", StreamSettings::new("A"))
+                .stream("live", StreamSettings::new("B")),
+            "declared twice",
+        ),
+        (
+            broker
+                .settings
+                .clone()
+                .stream("live", StreamSettings::new(&main.name).subject_prefix("x")),
+            "both the JetStream stream",
+        ),
+        (
+            broker.settings.clone().stream(
+                "live",
+                StreamSettings::new("LIVE").subject_prefix(format!("{}.live", main.subject_prefix)),
+            ),
+            "overlap",
+        ),
+    ] {
+        match Events::start(pool.clone(), broker.jetstream.clone(), settings).await {
+            Err(Error::Misuse(why)) => assert!(why.contains(what), "{what}: {why}"),
+            other => panic!("{what}: {other:?}"),
+        }
+    }
+    assert!(
+        broker.jetstream.get_stream(&main.name).await.is_err(),
+        "nothing made"
+    );
+    broker.done().await;
+}
+
+/// A stream declared once and no longer: its rows stay where they are —
+/// nothing publishes them, and nothing drops them — and the status of every
+/// subject lists it, undeclared, with what waits.
+#[sqlx::test(migrations = false)]
+async fn a_stream_no_longer_declared_keeps_its_rows_and_says_so(pool: PgPool) {
+    let broker = Broker::live().await;
+    Events::install(&pool).await.unwrap();
+    let start =
+        |settings: Settings| Events::start(pool.clone(), broker.jetstream.clone(), settings);
+    start(broker.settings.clone()).await.unwrap().stop().await;
+    emit_each(&pool, &[seen("north", 1)]).await;
+    let without = Settings {
+        others: Vec::new(),
+        ..broker.settings.clone()
+    };
+    let events = start(without).await.unwrap();
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    until("the main stream published", || async {
+        broker.bodies().await.len() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(broker.bodies_of("live").await.is_empty());
+    let status = events.status(&Filter::all()).await.unwrap();
+    let streams: Vec<(&str, Option<&str>, u64)> = status
+        .streams
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|s| (s.key.as_str(), s.name.as_deref(), s.pending))
+        .collect();
+    assert_eq!(
+        streams,
+        [
+            ("", Some(broker.settings.main.name.as_str()), 0),
+            ("live", None, 1)
+        ]
+    );
+    match events.status(&Filter::stream("live")).await {
+        Err(Error::Misuse(why)) => assert!(why.contains("no stream `live` is declared"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    events.stop().await;
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM magic_events.outbox WHERE stream = 'live'"
+        )
+        .await,
+        1
     );
     broker.done().await;
 }

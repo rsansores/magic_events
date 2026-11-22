@@ -5,7 +5,9 @@
 //! one to an outbox table in the writing transaction, as one more statement;
 //! a relay inside the host process ([`Events`]), one at a time across every
 //! process that runs it, publishes what committed to NATS JetStream as
-//! CloudEvents, and deletes it once the stream acknowledged it.
+//! CloudEvents, and deletes it once the stream acknowledged it. An event
+//! goes to the main stream, or to another the settings declare
+//! ([`Settings::stream`]), each kept apart.
 //!
 //! ```no_run
 //! use magic_events::{emit, Event, Events, Settings};
@@ -75,11 +77,11 @@ pub use emit::emit;
 pub use error::Error;
 pub use run::Events;
 pub use schema::migration;
-pub use settings::{Settings, Storage};
+pub use settings::{Settings, Storage, StreamSettings};
 
 /// The version of the crate's tables, in the schema `magic_events`: the relay
 /// refuses to run against a database that installed another.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// An event: a type whose values [`emit`] writes, each a message on the
 /// stream. Implemented by `#[derive(Event)]`, and by nothing else.
@@ -126,6 +128,7 @@ pub trait Event: serde::Serialize + __private::Sealed {
 /// | `version` | the version of the type's body (required), a whole number from 1: a change consumers cannot read is a new version |
 /// | `subject` | where the message is published (required), after the settings' prefix: tokens joined by dots, each text, `{field}`s, or both (`orders.{store}.shipped`). A field is any `Display` value; the text of a token is printable ASCII, with no `*` or `>` |
 /// | `ce_subject` | the CloudEvents `subject` attribute, if any: text and `{field}`s, as `"{id}"` |
+/// | `stream` | the key of the stream it goes to, if not the main one: lowercase ASCII letters, digits and `_`, starting with a letter, 32 bytes at most, as `"live"` — a stream [`Settings::stream`] declares |
 /// | `crate` | the path to this crate, when a host reaches it through another: `crate = "platform::events"` — on an enum, on the enum itself |
 ///
 /// The body is a JSON object: the event's fields, as serde writes them; for
@@ -136,9 +139,13 @@ pub trait Event: serde::Serialize + __private::Sealed {
 /// `try_from`, `remote`) is refused. A body that is still no object — a
 /// variant wrapping a number — is refused by [`emit`].
 ///
+/// Each variant of an enum may go to a stream of its own: `stream` is per
+/// event, as `subject` is.
+///
 /// Whatever the derive cannot honour is a compile error pointing at what
 /// says it: a `{field}` that is no field, or not `Display`; a token no
-/// subject may hold; two variants of one type and version. What only a
+/// subject may hold; two variants of one type and version; a stream key that
+/// is no key. What only a
 /// value shows — a field that renders as a token no subject may hold — is
 /// refused by [`emit`].
 pub use magic_events_derive::Event;
@@ -168,6 +175,8 @@ pub mod __private {
         pub subject: Vec<String>,
         /// Its `ce-subject`, rendered and not encoded yet.
         pub ce_subject: Option<String>,
+        /// The key of the stream it goes to: empty for the main one.
+        pub stream: &'static str,
     }
 
     /// Writes `value` at the end of `out`.

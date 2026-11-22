@@ -1,6 +1,7 @@
 //! Every shape the derive accepts: a struct, an enum of struct and newtype
-//! variants, a token of text and fields together, a `ce_subject`, generics,
-//! and the serde attributes that leave the body an object.
+//! variants, a token of text and fields together, a `ce_subject`, a stream
+//! of its own per event, generics, and the serde attributes that leave the
+//! body an object.
 
 use magic_events::Event;
 use serde::Serialize;
@@ -42,7 +43,13 @@ pub enum Catalog {
     ProductUpdatedAgain(Ids),
     #[event(type = "catalog.reset", version = 1, subject = "catalog.reset")]
     Reset(Ids),
+    #[event(type = "catalog.viewed", version = 1, subject = "catalog.{store}.viewed", stream = "live_2")]
+    Viewed { store: u32 },
 }
+
+#[derive(Serialize, Event)]
+#[event(type = "screen.changed", version = 1, subject = "screens.changed", stream = "live")]
+pub struct ScreenChanged {}
 
 #[derive(Serialize, Event)]
 #[event(type = "thing.done", version = 1, subject = "things.{who}.done")]
@@ -57,4 +64,6 @@ fn main() {
     takes(&Noted {});
     takes(&Catalog::Reset(Ids { store: "a".into(), ids: vec![] }));
     takes(&Done { who: "me" });
+    takes(&Catalog::Viewed { store: 1 });
+    takes(&ScreenChanged {});
 }

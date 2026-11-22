@@ -49,10 +49,10 @@ impl std::fmt::Debug for Events {
 
 impl Events {
     /// Starts the relay: checks the settings and the database's schema,
-    /// creates or checks the stream ([`Settings::manage_stream`]), records
-    /// [`Settings::max_body`] for [`emit`](crate::emit) — every process that
-    /// starts records its own, so they should agree — and spawns the relay
-    /// on the current Tokio runtime.
+    /// creates or checks every stream they declare
+    /// ([`Settings::manage_stream`]), records each stream's `max_body` for
+    /// [`emit`](crate::emit) — every process that starts records its own, so
+    /// they should agree — and spawns the relay on the current Tokio runtime.
     ///
     /// The relay holds a connection of its own while it leads, for its lock:
     /// opened with `pool`'s options, not taken from it — one more than the
@@ -63,12 +63,14 @@ impl Events {
     ///
     /// # Errors
     ///
-    /// [`Error::Misuse`] for settings the relay cannot run with, a schema
-    /// not at this build's version ([`Events::install`]), a stream that does
-    /// not take the relay's subjects or that the broker refuses as the
-    /// settings say it, or a `max_body` the broker's `max_payload` cannot
-    /// carry with 4 KiB of headers; [`Error::Broker`] when the broker does
-    /// not answer; [`Error::Database`] when the database fails.
+    /// [`Error::Misuse`] for settings the relay cannot run with — among them
+    /// a stream key declared twice, two keys of one stream, or subject
+    /// prefixes that overlap — a schema not at this build's version
+    /// ([`Events::install`]), a stream that does not take the relay's
+    /// subjects or that the broker refuses as the settings say it, or a
+    /// `max_body` the broker's `max_payload` cannot carry with 4 KiB of
+    /// headers; [`Error::Broker`] when the broker does not answer;
+    /// [`Error::Database`] when the database fails.
     pub async fn start(
         pool: PgPool,
         jetstream: async_nats::jetstream::Context,
@@ -76,15 +78,21 @@ impl Events {
     ) -> Result<Self, Error> {
         let relay = Self::prepare(pool, Arc::new(jetstream.clone()), settings).await?;
         let max_payload = jetstream.client().server_info().max_payload;
-        let needed = u64::from(relay.settings.max_body) + u64::from(HEADROOM);
-        if max_payload > 0 && u64::try_from(max_payload).unwrap_or(u64::MAX) < needed {
-            return Err(Error::Misuse(format!(
-                "the broker takes messages of {max_payload} bytes at most (`max_payload`), and a \
-                 body of `max_body` {} bytes needs {needed} with its headers",
-                relay.settings.max_body
-            )));
+        for declared in relay.settings.declared() {
+            let max_body = declared.stream.max_body;
+            let needed = u64::from(max_body) + u64::from(HEADROOM);
+            if max_payload > 0 && u64::try_from(max_payload).unwrap_or(u64::MAX) < needed {
+                return Err(Error::Misuse(format!(
+                    "the broker takes messages of {max_payload} bytes at most (`max_payload`), \
+                     and a body of `max_body` {max_body} bytes needs {needed} with its headers \
+                     (the stream `{}`)",
+                    declared.stream.name
+                )));
+            }
         }
-        stream::ensure(&jetstream, &relay.settings).await?;
+        for declared in relay.settings.declared() {
+            stream::ensure(&jetstream, declared.stream).await?;
+        }
         Self::probe(&relay).await?;
         Self::record(&relay).await?;
         Ok(Self::spawn(relay, jetstream))
@@ -127,14 +135,22 @@ impl Events {
         fenced
     }
 
-    /// Records the relay's `max_body`, which `emit` holds bodies to: the
-    /// last process to start says it for all of them.
+    /// Records each declared stream's `max_body`, which `emit` holds bodies
+    /// of that stream to — the stream's relay row, made for a stream
+    /// declared the first time: the last process to start says it for all
+    /// of them.
     pub(crate) async fn record(relay: &Relay) -> Result<(), Error> {
         let mut tx = crate::relay::begin(&relay.pool, &relay.settings).await?;
-        sqlx::query("UPDATE magic_events.relay SET max_body = $1 WHERE id = 1")
-            .bind(i32::try_from(relay.settings.max_body).unwrap_or(i32::MAX))
+        for declared in relay.settings.declared() {
+            sqlx::query(
+                "INSERT INTO magic_events.relay (stream, max_body) VALUES ($1, $2) \
+                 ON CONFLICT (stream) DO UPDATE SET max_body = excluded.max_body",
+            )
+            .bind(declared.key)
+            .bind(i32::try_from(declared.stream.max_body).unwrap_or(i32::MAX))
             .execute(&mut *tx)
             .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -217,9 +233,9 @@ impl Events {
     /// on the schema, `INSERT` on `magic_events.outbox`, `USAGE` on its
     /// sequence (`magic_events.outbox_id_seq`) and `SELECT` on
     /// `magic_events.relay`; the relay's role needs `SELECT`, `UPDATE` and
-    /// `DELETE` on the outbox, `SELECT` and `UPDATE` on `magic_events.relay`,
-    /// `SELECT`, `INSERT` and `UPDATE` on `magic_events.published`, and
-    /// `SELECT` on `magic_events.version`.
+    /// `DELETE` on the outbox, `SELECT`, `INSERT` and `UPDATE` on
+    /// `magic_events.relay` and on `magic_events.published`, and `SELECT` on
+    /// `magic_events.version`.
     ///
     /// # Errors
     ///
@@ -234,23 +250,34 @@ impl Events {
         Ok(())
     }
 
-    /// One pass now, as the relay, for a host's tests or a tool: how many
-    /// rows it published or set aside, or `None` when a relay — this
-    /// process's own, or another's — holds the lock.
+    /// One pass of every declared stream now, one after the other, as the
+    /// relay, for a host's tests or a tool: how many rows they published or
+    /// set aside, together, or `None` when a relay — this process's own, or
+    /// another's — holds the lock. A stream whose pass fails stops no other
+    /// stream's.
     ///
     /// # Errors
     ///
-    /// What stopped the pass: [`Error::Broker`] when the broker failed it,
+    /// What stopped the first pass that failed — the other streams' passes
+    /// ran all the same: [`Error::Broker`] when the broker failed it,
     /// [`Error::Database`] when the database did.
     pub async fn pass_now(&self) -> Result<Option<usize>, Error> {
-        let Some(mut lock) = Lock::take(&self.relay.pool, &self.relay.settings).await? else {
+        let Some(lock) = Lock::take(&self.relay.pool, &self.relay.settings).await? else {
             return Ok(None);
         };
-        let done = self
-            .relay
-            .pass(&mut lock, self.relay.settings.backoff.0)
-            .await;
-        lock.release().await;
+        let lock = tokio::sync::Mutex::new(lock);
+        let mut done = Ok(0);
+        for declared in self.relay.settings.declared() {
+            let pass = self
+                .relay
+                .pass(&lock, declared, self.relay.settings.backoff.0)
+                .await;
+            done = match (done, pass) {
+                (Ok(n), Ok(m)) => Ok(n + m),
+                (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            };
+        }
+        lock.into_inner().release().await;
         done.map(Some)
     }
 
@@ -262,21 +289,27 @@ impl Events {
     ///
     /// [`Error::Database`] when the database fails.
     pub async fn unpark(&self, id: i64) -> Result<bool, Error> {
-        Ok(self.unpark_where(Some(id)).await? > 0)
+        Ok(self.unpark_where(Some(id), None, None).await? > 0)
     }
 
-    /// Sends every parked row again with the next pass, in their order:
-    /// answers how many.
+    /// Sends every parked row under `filter` — of one stream, and its
+    /// subjects the filter takes — again with the stream's next pass, in
+    /// their order: answers how many.
     ///
     /// # Errors
     ///
-    /// [`Error::Database`] when the database fails.
-    pub async fn unpark_all(&self) -> Result<u64, Error> {
-        self.unpark_where(None).await
+    /// [`Error::Misuse`] for a filter of no declared stream, or that is not a
+    /// subject filter under a stream's prefix; [`Error::Database`] when the
+    /// database fails.
+    pub async fn unpark_all(&self, filter: &Filter) -> Result<u64, Error> {
+        let scope = filter.resolve(&self.relay.settings)?;
+        self.unpark_where(None, Some(scope.declared.key), scope.pattern())
+            .await
     }
 
-    /// What the relay, the outbox and the stream are as `filter` sees them:
-    /// see [`status`](crate::status). A broker that does not answer within
+    /// What the relay, the outbox and the stream are as `filter` sees them —
+    /// one stream, and its subjects the filter takes: see
+    /// [`status`](crate::status). A broker that does not answer within
     /// five seconds leaves its part out and says why, so the answer still
     /// shows what the database knows.
     ///
@@ -288,8 +321,9 @@ impl Events {
     ///
     /// # Errors
     ///
-    /// [`Error::Misuse`] for a filter that is not a subject filter under the
-    /// settings' prefix; [`Error::Database`] when the database fails.
+    /// [`Error::Misuse`] for a filter of no declared stream, or that is not a
+    /// subject filter under a stream's prefix; [`Error::Database`] when the
+    /// database fails.
     pub async fn status(&self, filter: &Filter) -> Result<Status, Error> {
         status::status(
             &self.relay.pool,
@@ -306,19 +340,30 @@ impl Events {
     ///
     /// # Errors
     ///
-    /// [`Error::Misuse`] for a filter that is not a subject filter under the
-    /// settings' prefix; [`Error::Broker`] when the broker fails.
+    /// [`Error::Misuse`] for a filter of no declared stream, or that is not a
+    /// subject filter under a stream's prefix; [`Error::Broker`] when the
+    /// broker fails.
     pub async fn recent(&self, filter: &Filter, limit: u32) -> Result<Recent, Error> {
         status::recent(&self.jetstream, &self.relay.settings, filter, limit).await
     }
 
-    async fn unpark_where(&self, id: Option<i64>) -> Result<u64, Error> {
+    /// Unparks the parked rows of id `id`, of the stream `stream`, and whose
+    /// subject matches `pattern`: `None` for any.
+    async fn unpark_where(
+        &self,
+        id: Option<i64>,
+        stream: Option<&str>,
+        pattern: Option<String>,
+    ) -> Result<u64, Error> {
         let mut tx = crate::relay::begin(&self.relay.pool, &self.relay.settings).await?;
         let done = sqlx::query(
             "UPDATE magic_events.outbox SET parked_at = NULL, attempts = 0 \
-              WHERE parked_at IS NOT NULL AND ($1::bigint IS NULL OR id = $1)",
+              WHERE parked_at IS NOT NULL AND ($1::bigint IS NULL OR id = $1) \
+                AND ($2::text IS NULL OR stream = $2) AND ($3::text IS NULL OR subject ~ $3)",
         )
         .bind(id)
+        .bind(stream)
+        .bind(pattern)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

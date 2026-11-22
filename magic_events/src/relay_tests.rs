@@ -4,7 +4,8 @@
 //! for good is set aside and holds back nothing.
 
 use super::*;
-use crate::tests::{count, emit_each, idle, shipped, until, Broker, Faulty, Mode};
+use crate::status::Filter;
+use crate::tests::{count, emit_each, idle, seen, shipped, until, Broker, Faulty, Mode};
 use crate::Events;
 use sqlx::PgPool;
 
@@ -35,7 +36,7 @@ async fn a_committed_event_is_one_message_with_every_header(pool: PgPool) {
     let messages = broker.messages().await;
     assert_eq!(messages.len(), 1);
     let m = &messages[0];
-    let prefix = &broker.settings.subject_prefix;
+    let prefix = &broker.settings.main.subject_prefix;
     assert_eq!(m.subject, format!("{prefix}.orders.north.shipped"));
     assert_eq!(m.id, id.to_string());
     assert_eq!(m.msg_id.as_deref(), Some(m.id.as_str()));
@@ -182,7 +183,7 @@ async fn the_relay_backs_off_while_the_broker_is_away(pool: PgPool) {
         .backoff(Duration::from_millis(50), Duration::from_millis(400));
     let faulty = Faulty::new(broker.jetstream.clone());
     Events::install(&pool).await.unwrap();
-    crate::stream::ensure(&broker.jetstream, &broker.settings)
+    crate::stream::ensure(&broker.jetstream, &broker.settings.main)
         .await
         .unwrap();
     faulty.set(Mode::Down);
@@ -229,8 +230,9 @@ async fn a_message_published_and_not_deleted_is_held_once(pool: PgPool) {
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1), shipped("north", 2)]).await;
     let mut lock = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
-    let mut rows = events_relay(&events).pending(&mut lock).await.unwrap();
-    let published = events_relay(&events).send(&mut rows).await;
+    let relay = events_relay(&events);
+    let mut rows = relay.pending(&mut lock, main(relay)).await.unwrap();
+    let published = relay.send(main(relay), &mut rows).await;
     assert_eq!((published.acked, published.failure), (2, None));
     lock.release().await;
     assert_eq!(
@@ -319,7 +321,7 @@ async fn a_message_refused_for_good_is_parked_and_holds_back_nothing(pool: PgPoo
         count(&pool, "SELECT count(*) FROM magic_events.outbox").await,
         0
     );
-    assert_eq!(events.unpark_all().await.unwrap(), 0);
+    assert_eq!(events.unpark_all(&Filter::all()).await.unwrap(), 0);
     broker.done().await;
 }
 
@@ -331,7 +333,7 @@ async fn a_message_the_stream_refuses_as_too_large_is_parked(pool: PgPool) {
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     let mut stream = broker
         .jetstream
-        .get_stream(&broker.settings.stream)
+        .get_stream(&broker.settings.main.name)
         .await
         .unwrap();
     let mut config = stream.info().await.unwrap().config.clone();
@@ -364,8 +366,8 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
     emit_each(&pool, &[shipped("north", 1)]).await;
     let relay = events_relay(&events);
     let mut lock = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
-    let mut rows = relay.pending(&mut lock).await.unwrap();
-    let published = relay.send(&mut rows).await;
+    let mut rows = relay.pending(&mut lock, main(relay)).await.unwrap();
+    let published = relay.send(main(relay), &mut rows).await;
     sqlx::query(
         "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' \
             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
@@ -374,7 +376,13 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
     .await
     .unwrap();
     assert!(relay
-        .settle(&mut lock, &rows, published, Duration::from_millis(10))
+        .settle(
+            &mut lock,
+            main(relay),
+            &rows,
+            published,
+            Duration::from_millis(10)
+        )
         .await
         .is_err());
     assert!(!lock.still_held().await);
@@ -415,6 +423,11 @@ fn events_relay(events: &Events) -> &Relay {
     events.relay()
 }
 
+/// The main stream of `relay`'s settings.
+fn main(relay: &Relay) -> Declared<'_> {
+    relay.settings.find("").expect("the main stream")
+}
+
 /// A relay whose database stops answering — here, a table lock it waits
 /// behind — gives up within its wait, and its session lets the lock go, so
 /// another process can take over; and its session is set to be ended by the
@@ -438,7 +451,8 @@ async fn a_relay_the_database_does_not_answer_lets_its_lock_go(pool: PgPool) {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    assert!(events_relay(&events).pending(&mut lock).await.is_err());
+    let relay = events_relay(&events);
+    assert!(relay.pending(&mut lock, main(relay)).await.is_err());
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "{:?}",
@@ -454,5 +468,187 @@ async fn a_relay_the_database_does_not_answer_lets_its_lock_go(pool: PgPool) {
     })
     .await;
     blocker.rollback().await.unwrap();
+    broker.done().await;
+}
+
+/// Two streams: each event goes to its own, under its own prefix, in the
+/// order its stream's events were emitted, and is counted for its stream.
+#[sqlx::test(migrations = false)]
+async fn each_event_goes_to_its_own_stream_in_order(pool: PgPool) {
+    let broker = Broker::live().await;
+    let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
+    let mut tx = pool.begin().await.unwrap();
+    for n in 0..4 {
+        crate::emit(&mut tx, &shipped("north", n)).await.unwrap();
+        crate::emit(&mut tx, &seen("north", n)).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    assert_eq!(events.pass_now().await.unwrap(), Some(8), "a pass each");
+
+    for (key, ty) in [("", "order.shipped.v1"), ("live", "order.seen.v1")] {
+        let prefix = &broker.stream(key).subject_prefix;
+        let messages = broker.messages_of(key).await;
+        let bodies: Vec<String> = messages.iter().map(|m| m.body.clone()).collect();
+        assert_eq!(
+            bodies,
+            (0..4)
+                .map(|n| format!(r#"{{"store":"north","n":{n}}}"#))
+                .collect::<Vec<_>>(),
+            "{key}"
+        );
+        assert!(messages
+            .iter()
+            .all(|m| m.ty == ty && m.subject.starts_with(&format!("{prefix}.orders.north."))));
+        let counted: i64 = sqlx::query_scalar(
+            "SELECT sum(count)::bigint FROM magic_events.published WHERE stream = $1 AND type = $2",
+        )
+        .bind(key)
+        .bind(ty)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(counted, 4, "{key}");
+    }
+    broker.done().await;
+}
+
+/// The stream `live` gone from the broker: its passes fail — its own
+/// failures counted, its rows kept — and the main stream's publish all the
+/// same; once it is back, its rows go out, in order.
+#[sqlx::test(migrations = false)]
+async fn a_stream_the_broker_fails_holds_back_no_other(pool: PgPool) {
+    let broker = Broker::live().await;
+    let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
+    let live = broker.stream("live").clone();
+    broker.jetstream.delete_stream(&live.name).await.unwrap();
+    emit_each(&pool, &[seen("north", 1), seen("north", 2)]).await;
+    emit_each(&pool, &[shipped("north", 1), shipped("north", 2)]).await;
+    match events.pass_now().await {
+        Err(e @ crate::Error::Broker { .. }) => assert!(e.is_transient(), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(broker.bodies().await.len(), 2, "the main stream published");
+    let failures = |key: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (i32, bool)>(
+                "SELECT failures, last_error IS NOT NULL FROM magic_events.relay WHERE stream = $1",
+            )
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(failures("live").await, (1, true));
+    assert_eq!(failures("").await, (0, false));
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM magic_events.outbox WHERE stream = 'live'"
+        )
+        .await,
+        2
+    );
+
+    crate::stream::ensure(&broker.jetstream, &live)
+        .await
+        .unwrap();
+    drain(&events).await;
+    assert_eq!(
+        broker.bodies_of("live").await,
+        [r#"{"store":"north","n":1}"#, r#"{"store":"north","n":2}"#]
+    );
+    assert_eq!(failures("live").await, (0, false));
+    broker.done().await;
+}
+
+/// The running relay: while a message of the stream `live` waits for an
+/// acknowledgement that does not come, the main stream's events go out —
+/// each stream's passes run on their own.
+#[sqlx::test(migrations = false)]
+async fn a_stream_waiting_on_the_broker_holds_back_no_other(pool: PgPool) {
+    let mut broker = Broker::live().await;
+    broker.settings = broker.settings.send_timeout(Duration::from_secs(2));
+    let faulty = Faulty::new(broker.jetstream.clone());
+    Events::install(&pool).await.unwrap();
+    for declared in broker.settings.declared() {
+        crate::stream::ensure(&broker.jetstream, declared.stream)
+            .await
+            .unwrap();
+    }
+    let relay = Events::prepare(
+        pool.clone(),
+        Arc::new(faulty.clone()),
+        broker.settings.clone(),
+    )
+    .await
+    .unwrap();
+    Events::record(&relay).await.unwrap();
+    let events = Events::spawn(relay, broker.jetstream.clone());
+    emit_each(&pool, &[seen("stall", 1)]).await;
+    until("the live message sent", || async {
+        !faulty.sent.lock().unwrap().is_empty()
+    })
+    .await;
+    let started = std::time::Instant::now();
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    until("the main stream published", || async {
+        broker.bodies().await.len() == 1
+    })
+    .await;
+    assert!(
+        started.elapsed() < broker.settings.send_timeout,
+        "waited for the other stream: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM magic_events.outbox WHERE stream = 'live'"
+        )
+        .await,
+        1,
+        "still waiting for its acknowledgement"
+    );
+    events.stop().await;
+    broker.done().await;
+}
+
+/// A message the broker refuses for good is parked on its own stream: the
+/// other stream's passes and failures know nothing of it.
+#[sqlx::test(migrations = false)]
+async fn a_message_parked_on_one_stream_is_that_streams(pool: PgPool) {
+    let broker = Broker::live().await;
+    let faulty = Faulty::new(broker.jetstream.clone());
+    let events = idle(&pool, &broker, Arc::new(faulty.clone())).await;
+    emit_each(&pool, &[seen("poison", 1), seen("north", 2)]).await;
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    for _ in 0..3 {
+        events.pass_now().await.unwrap();
+    }
+    drain(&events).await;
+    assert_eq!(broker.bodies().await.len(), 1);
+    assert_eq!(
+        broker.bodies_of("live").await,
+        [r#"{"store":"north","n":2}"#]
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM magic_events.outbox WHERE stream = 'live' AND parked_at IS NOT NULL"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        events.unpark_all(&Filter::all()).await.unwrap(),
+        0,
+        "none of the main stream's"
+    );
+    *faulty.refusing.lock().unwrap() = false;
+    assert_eq!(events.unpark_all(&Filter::stream("live")).await.unwrap(), 1);
+    drain(&events).await;
+    assert_eq!(broker.bodies_of("live").await.len(), 2);
     broker.done().await;
 }

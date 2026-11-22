@@ -80,9 +80,12 @@ that, behind one function.
 
 ## What it guarantees, exactly
 
+Each stream — the main one, and [any other](#several-streams) — is
+guaranteed this on its own:
+
 - **No event from a rolled-back transaction.** `emit` is an `INSERT` in
   your transaction; a rollback takes it away with your data.
-- **Every committed event reaches the stream, at least once.** A row leaves
+- **Every committed event reaches its stream, at least once.** A row leaves
   the outbox only after the stream acknowledged its message. Each message
   carries its event's id as `Nats-Msg-Id`, and the stream drops a message
   it already holds within its duplicate window (2 minutes by default). A
@@ -90,9 +93,9 @@ that, behind one function.
   and the row was not deleted — the relay died, or the acknowledgement was
   lost with the broker going away — and the message was sent again only
   after longer than the window.
-- **The events of one transaction go out in the order they were emitted.**
-  Events of *concurrent* transactions go out in the order of their rows'
-  ids, which is not commit order: a transaction that commits later with a
+- **The events of one transaction go out in the order they were emitted**,
+  within each stream. Events of *concurrent* transactions go out in the
+  order of their rows' ids, which is not commit order: a transaction that commits later with a
   lower id is published late — but never lost, since rows are deleted, not
   passed by a cursor. Two things can put an event of a transaction after
   the ones emitted after it: a message the broker refuses for good, which
@@ -109,12 +112,17 @@ that, behind one function.
   three times (too large for the stream, say), it is set aside — parked —
   with the broker's reason, and the rows behind it go on. `unpark` sends it
   again after a fix.
+- **A stream the broker fails holds back no other.** Each stream has passes,
+  a backoff and failures of its own: one deleted, full, or slow to answer
+  waits alone, and the others publish as they would without it.
 
 What it does **not** guarantee:
 
 - **Exactly-once delivery** to a consumer. A consumer acknowledges what it
   handled; one that crashes before acknowledging gets the event again, with
   the same `ce-id`. Deduplicate by `ce-id` where acting twice would hurt.
+- **Order across streams.** The events of one transaction that go to two
+  streams are two sets of messages, each in order in its own stream.
 - **Order across transactions.** Do not build a consumer on it. Thin events
   and a re-read make that safe: a consumer reads the current state, not the
   event's.
@@ -196,10 +204,56 @@ pub enum Catalog {
   same (leave it unacknowledged, or `nak` it with a delay). So either side
   may be upgraded first.
 - `#[event(ce_subject = "{id}")]` sets the CloudEvents `subject` attribute.
+- `#[event(stream = "live")]` sends it to [another stream](#several-streams)
+  than the main one.
 
 `emit` does no broker I/O: it is one `INSERT`, about 17 µs over the write
 it goes with (below). Call it where you write, in the same transaction —
 there is no other way to emit.
+
+## Several streams
+
+One outbox can feed several JetStream streams: an integration contract
+other systems read, say, and the events of your own screens, which no one
+else should, kept for minutes. Each stream has its own name, subject
+prefix, retention, `max_body` and permissions; an event says which it goes
+to, and every guarantee above holds for each one.
+
+```rust
+use magic_events::{Settings, StreamSettings};
+use std::time::Duration;
+
+// A screen's own event: kept for ten minutes, read by no one else.
+#[derive(serde::Serialize, magic_events::Event)]
+#[event(
+    type = "order.seen",
+    version = 1,
+    subject = "orders.{store}.seen",
+    stream = "live"
+)]
+pub struct OrderSeen {
+    pub store: StoreId,
+    pub ids: Vec<OrderId>,
+}
+
+// Once, in main: the main stream, and `live` beside it.
+let settings = Settings::new("SHOP_EVENTS", "//shop.example.com").stream(
+    "live",
+    StreamSettings::new("SHOP_LIVE").retention(Duration::from_secs(10 * 60)),
+);
+```
+
+`OrderSeen` lands on `shop_live.orders.<store>.seen` in `SHOP_LIVE`. An event
+that says no `stream` goes to the main one. One relay publishes them all, in
+one process at a time; each stream has its own passes, backoff and parked
+rows, so a stream whose broker fails holds back no other.
+
+`emit` refuses an event of a stream no relay ever declared — it would wait
+with nothing to publish it. `Events::start` refuses a key declared twice, two
+keys of one JetStream stream, and subject prefixes one of which takes the
+other's subjects. A stream declared once and no longer keeps its waiting
+events — nothing publishes them, nothing drops them — and the status says
+so: declare it again, or delete its rows.
 
 ## Setting up
 
@@ -225,8 +279,8 @@ the tables adds a step, says so in the changelog, and never edits one.
 Grants are yours: a role that emits needs `USAGE` on the schema, `INSERT`
 on `magic_events.outbox`, `USAGE` on `magic_events.outbox_id_seq` and
 `SELECT` on `magic_events.relay`; the relay's role needs `SELECT`, `UPDATE`
-and `DELETE` on the outbox, `SELECT` and `UPDATE` on `magic_events.relay`,
-`SELECT`, `INSERT` and `UPDATE` on `magic_events.published`, and `SELECT` on
+and `DELETE` on the outbox, `SELECT`, `INSERT` and `UPDATE` on
+`magic_events.relay` and on `magic_events.published`, and `SELECT` on
 `magic_events.version`.
 
 The relay's role is the one your pool logs in as, unless
@@ -238,7 +292,9 @@ the relay's grants to a role of the relay's, and no other role reads the
 outbox. `emit` runs as your transaction does; `Events::install` as the login
 role, which owns what it creates.
 
-Every setting has a default and a setter:
+Every setting has a default and a setter. Those of a stream —
+`subject_prefix` to `max_body` below — are the main stream's on `Settings`,
+and another's on its `StreamSettings`; the rest are the relay's:
 
 ```rust
 Settings::new("SHOP_EVENTS", "//shop.example.com")
@@ -250,17 +306,18 @@ Settings::new("SHOP_EVENTS", "//shop.example.com")
 
 | Setting | Default | |
 |---|---|---|
+| `subject_prefix` | the stream's name, lowercase | the first tokens of every subject |
 | `retention` | 7 days | the stream's `max_age` |
 | `duplicate_window` | 2 min | how long the stream drops a message it holds |
 | `storage`, `replicas` | file, 1 | the stream's, set when it is created |
 | `manage_stream` | `true` | `false`: the stream is the operator's; it must exist and take `<prefix>.>` |
-| `idle` | 200 ms | how long the relay waits when the outbox is empty |
+| `max_body` | 64 KiB | the largest body `emit` takes for the stream; held to the broker's `max_payload` at start |
+| `idle` | 200 ms | how long a stream's passes wait when it has nothing waiting |
 | `batch` | 256 | rows read per pass |
-| `in_flight` | 64 | messages sent and not acknowledged yet |
+| `in_flight` | 64 | messages of a stream sent and not acknowledged yet |
 | `send_timeout` | 10 s | how long a message may wait for its acknowledgement |
-| `backoff` | 500 ms to 60 s | how long the relay waits after a failed pass, doubling |
-| `standby` | 30 s | how often a process that is not the relay asks for its lock; with `send_timeout` and 30 s, within `duplicate_window` |
-| `max_body` | 64 KiB | the largest body `emit` takes; held to the broker's `max_payload` at start |
+| `backoff` | 500 ms to 60 s | how long a stream's passes wait after one failed, doubling |
+| `standby` | 30 s | how often a process that is not the relay asks for its lock; with `send_timeout` and 30 s, within every stream's `duplicate_window` |
 | `role` | the login role | the role the relay and the crate's own transactions run as |
 
 The relay runs inside your process, in a task of its own: no service to
@@ -271,8 +328,9 @@ a partition, a frozen machine — PostgreSQL ends its session, and lets the
 lock go, within about 30 seconds; a leader whose database stops answering
 gives up within 30 seconds too, and stands by.
 
-Every process records its `max_body` as it starts, and `emit` holds bodies
-to the last one recorded: give every process the same settings.
+Every process records each stream's `max_body` as it starts, and `emit`
+holds bodies to the last one recorded: give every process the same
+settings.
 
 ## The messages
 
@@ -361,9 +419,10 @@ the event, `ce-id` to deduplicate, and the body as JSON.
 
 ## Monitoring
 
-`Events::status` answers what waits in the outbox and since when, what was
-set aside and why, whether a relay runs, what the stream holds per subject,
-how far behind each consumer is, and what was published per day and type.
+`Events::status` answers, for one stream, what waits in the outbox and since
+when, what was set aside and why, whether a relay runs, what the stream
+holds per subject, how far behind each consumer is, and what was published
+per day and type — and what waits for every other stream.
 `Events::recent` answers the last messages, headers and bodies:
 
 ```rust
@@ -373,15 +432,19 @@ let status = events.status(&Filter::all()).await?;
 let one_store = events
     .status(&Filter::subject("shop_events.orders.7.>"))
     .await?;
+let live = events.status(&Filter::stream("live")).await?;
 let last_ten = events.recent(&Filter::all(), 10).await?;
 ```
 
 ![The shop example's events page, with events flowing](https://raw.githubusercontent.com/rsansores/magic_events/main/dashboard/images/flowing.png)
 
-Every read takes a subject filter, so a view can be narrowed to what one
-caller may see. A consumer's lag is the whole stream's, and the published
-counts are kept per type: both are answered only for `Filter::all()` — show
-them on an operator's view. A broker that does not answer leaves its part
+Every read is of one stream — `Filter::all()` the main one's every subject,
+`Filter::stream(key)` another's, `Filter::subject` the stream whose prefix
+it is under — and takes a subject filter, so a view can be narrowed to what
+one caller may see. A consumer's lag is the whole stream's, the published
+counts are kept per type, and every stream's outbox is every subject's:
+these are answered only for a stream's every subject — show them on an
+operator's view. A broker that does not answer leaves its part
 out and says why; the status is what you look at when things fail.
 
 The answers serialize as JSON for
@@ -393,7 +456,7 @@ down, and why.
 ```rust
 // After fixing what the broker refused: send it again with the next pass.
 events.unpark(id).await?;
-events.unpark_all().await?;
+events.unpark_all(&Filter::all()).await?;
 ```
 
 ## Recipes
@@ -489,7 +552,7 @@ with no fact behind it — record the fact, and emit with it.
 
 ## Status
 
-`0.1`. The API may change before `1.0`. PostgreSQL 14 or later,
+`0.2`. The API may change before `1.0`. PostgreSQL 14 or later,
 [sqlx] 0.8, [async-nats] 0.50, Rust 1.88 or later.
 
 [sqlx]: https://crates.io/crates/sqlx

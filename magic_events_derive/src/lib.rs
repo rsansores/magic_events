@@ -5,8 +5,8 @@
 //!
 //! Everything the derive is told is checked where it is written: a subject
 //! token no subject may hold, a `{field}` that is no field, a field that is
-//! not `Display`, a type two variants share — each is a compile error
-//! pointing at what says it.
+//! not `Display`, a type two variants share, a stream key that is no key —
+//! each is a compile error pointing at what says it.
 //!
 //! [magic_events]: https://docs.rs/magic_events
 //! [`magic_events::Event`]: https://docs.rs/magic_events/latest/magic_events/derive.Event.html
@@ -34,7 +34,7 @@ pub fn derive_event(input: Tokens) -> Tokens {
 }
 
 /// The keys `#[event(…)]` takes on a struct, or on a variant.
-const EVENT_KEYS: &str = "`type`, `version`, `subject`, `ce_subject` or `crate`";
+const EVENT_KEYS: &str = "`type`, `version`, `subject`, `ce_subject`, `stream` or `crate`";
 
 /// What one `#[event(…)]` says.
 #[derive(Default)]
@@ -43,6 +43,7 @@ struct Args {
     version: Option<LitInt>,
     subject: Option<LitStr>,
     ce_subject: Option<LitStr>,
+    stream: Option<LitStr>,
     krate: Option<LitStr>,
 }
 
@@ -64,6 +65,7 @@ impl Args {
                     Some("version") => once(&mut args.version, &meta),
                     Some("subject") => once(&mut args.subject, &meta),
                     Some("ce_subject") => once(&mut args.ce_subject, &meta),
+                    Some("stream") => once(&mut args.stream, &meta),
                     _ => Err(meta.error(format!("expected {EVENT_KEYS}"))),
                 }
             })?;
@@ -215,6 +217,37 @@ fn event_type(ty: &LitStr) -> syn::Result<String> {
     Ok(text)
 }
 
+/// The longest stream key, in bytes: what `Settings::stream` takes.
+const LONGEST_KEY: usize = 32;
+
+/// The stream key, checked: lowercase ASCII letters, digits and `_`,
+/// starting with a letter, 32 bytes at most.
+fn stream_key(key: &LitStr) -> syn::Result<String> {
+    let text = key.value();
+    if text.is_empty() {
+        return Err(syn::Error::new(
+            key.span(),
+            "an empty stream key: an event of the main stream says no `stream`, and one of \
+             another names its key, as `live`",
+        ));
+    }
+    let valid = text.len() <= LONGEST_KEY
+        && text.starts_with(|c: char| c.is_ascii_lowercase())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !valid {
+        return Err(syn::Error::new(
+            key.span(),
+            format!(
+                "`{text}` is no stream key: one is lowercase ASCII letters, digits and `_`, \
+                 starting with a letter, 32 bytes at most, as `live`"
+            ),
+        ));
+    }
+    Ok(text)
+}
+
 /// The serde attributes of a type that make its JSON something other than
 /// its fields: refused on an event, whose body is an object of its fields.
 const REFUSED_SHAPES: [&str; 5] = ["transparent", "into", "from", "try_from", "remote"];
@@ -246,6 +279,8 @@ struct One {
     subject: Vec<Vec<Part>>,
     subject_span: Span,
     ce_subject: Option<(Vec<Part>, Span)>,
+    /// The key of the stream it goes to: empty for the main one.
+    stream: String,
 }
 
 impl One {
@@ -263,12 +298,17 @@ impl One {
             Some(lit) => Some((parts(lit)?, lit.span())),
             None => None,
         };
+        let stream = match &args.stream {
+            Some(key) => stream_key(key)?,
+            None => String::new(),
+        };
         Ok(One {
             ty: event_type(&ty)?,
             version: version(&ver)?,
             subject: subject(&subj)?,
             subject_span: subj.span(),
             ce_subject,
+            stream,
         })
     }
 
@@ -331,6 +371,7 @@ impl One {
         };
         let ty = &self.ty;
         let version = self.version;
+        let stream = &self.stream;
         let variant = match variant {
             Some(i) => quote! { ::std::option::Option::Some(#i) },
             None => quote! { ::std::option::Option::None },
@@ -342,6 +383,7 @@ impl One {
                 variant: #variant,
                 subject: ::std::vec![#(#tokens),*],
                 ce_subject: #ce_subject,
+                stream: #stream,
             }
         }
     }

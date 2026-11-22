@@ -2,6 +2,7 @@
 //! own or without, and never over a schema that is not the crate's.
 
 use super::*;
+use crate::tests::{count, until, Broker};
 use crate::Events;
 use sqlx::PgPool;
 
@@ -123,4 +124,119 @@ async fn the_outbox_is_kept_as_a_queue(pool: PgPool) {
     for index in ["outbox_parked", "outbox_pending"] {
         assert!(indexes.contains(&index.to_owned()), "{indexes:?}");
     }
+    // A stream's rows, in order: what a pass of one stream reads.
+    let pending: String =
+        sqlx::query_scalar("SELECT pg_get_indexdef('magic_events.outbox_pending'::regclass)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        pending.ends_with("(stream, id) WHERE (parked_at IS NULL)"),
+        "{pending}"
+    );
+}
+
+/// What `emit` ran in builds of schema 1: a writer of such a build may still
+/// run while a database is upgraded.
+const V1_EMIT: &str = "WITH bound AS ( \
+         SELECT coalesce((SELECT max_body FROM magic_events.relay WHERE id = 1), 65536) AS max_body), \
+     written AS ( \
+         INSERT INTO magic_events.outbox (event_id, subject, type, headers, body) \
+         SELECT $1, $2, 'order.shipped.v1', '{\"ce-type\": \"order.shipped.v1\"}', $3 FROM bound \
+          WHERE length($3) <= bound.max_body \
+         RETURNING 1) \
+     SELECT max_body, EXISTS (SELECT 1 FROM written) FROM bound";
+
+async fn v1_emit(pool: &PgPool, store: &str) {
+    let (_, written): (i32, bool) = sqlx::query_as(V1_EMIT)
+        .bind(uuid::Uuid::now_v7())
+        .bind(format!("orders.{store}.shipped"))
+        .bind(format!(r#"{{"store":"{store}"}}"#).into_bytes())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert!(written);
+}
+
+/// A database of schema 1 with events waiting — and a relay's limit, and
+/// counts — upgraded in place: what was there is the main stream's, a
+/// writer of the build before goes on writing to it, and the relay
+/// publishes it all there.
+#[sqlx::test(migrations = false)]
+async fn a_database_of_version_1_upgrades_in_place(pool: PgPool) {
+    sqlx::raw_sql(&migration(1).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "UPDATE magic_events.relay SET max_body = 1000, failures = 2 WHERE id = 1; \
+         INSERT INTO magic_events.published (day, type, count) \
+         VALUES ((now() AT TIME ZONE 'UTC')::date, 'order.shipped.v1', 5)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    v1_emit(&pool, "north").await;
+    v1_emit(&pool, "south").await;
+
+    Events::install(&pool).await.unwrap();
+    assert_eq!(installed(&pool).await, Some(SCHEMA_VERSION));
+    let relay: Vec<(String, Option<i32>, Option<i32>, i32)> = sqlx::query_as(
+        "SELECT stream, id, max_body, failures FROM magic_events.relay ORDER BY stream",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(relay, [(String::new(), Some(1), Some(1000), 2)]);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM magic_events.outbox WHERE stream = ''"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count FROM magic_events.published WHERE stream = ''"
+        )
+        .await,
+        5
+    );
+    v1_emit(&pool, "east").await;
+
+    let broker = Broker::new().await;
+    let events = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone(),
+    )
+    .await
+    .unwrap();
+    until("the three published", || async {
+        broker.bodies().await.len() == 3
+    })
+    .await;
+    events.stop().await;
+    let prefix = &broker.settings.main.subject_prefix;
+    let subjects: Vec<String> = broker
+        .messages()
+        .await
+        .into_iter()
+        .map(|m| m.subject)
+        .collect();
+    assert_eq!(
+        subjects,
+        ["north", "south", "east"].map(|s| format!("{prefix}.orders.{s}.shipped"))
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count FROM magic_events.published WHERE stream = ''"
+        )
+        .await,
+        8
+    );
+    broker.done().await;
 }

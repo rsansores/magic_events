@@ -3,7 +3,7 @@
 //! where a durable consumer stopped.
 
 use super::*;
-use crate::tests::{emit_each, idle, shipped, until, Broker};
+use crate::tests::{emit_each, idle, seen, shipped, until, Broker, Seen};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
@@ -102,7 +102,7 @@ fn consuming(
     let task = tokio::spawn({
         let (jetstream, stream, durable) = (
             broker.jetstream.clone(),
-            broker.settings.stream.clone(),
+            broker.settings.main.name.clone(),
             durable.to_owned(),
         );
         let got = got.clone();
@@ -160,7 +160,7 @@ async fn a_consumer_gets_every_event_once_in_order_with_its_id(pool: PgPool) {
         placed(2),
     ];
     let ids = publish(&pool, &events, &orders).await;
-    let prefix = &broker.settings.subject_prefix;
+    let prefix = &broker.settings.main.subject_prefix;
     let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
     until("three events", || async { got.lock().unwrap().len() == 3 }).await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -180,7 +180,7 @@ async fn a_handler_that_fails_has_the_event_again(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     let ids = publish(&pool, &events, &[placed(1)]).await;
-    let prefix = &broker.settings.subject_prefix;
+    let prefix = &broker.settings.main.subject_prefix;
     let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), true);
     until("delivered again", || async {
         got.lock().unwrap().len() == 1
@@ -225,7 +225,7 @@ async fn upgraded(broker: &Broker, durable: &str, filter: String, wanted: usize)
     let task = tokio::spawn({
         let (jetstream, stream, durable) = (
             broker.jetstream.clone(),
-            broker.settings.stream.clone(),
+            broker.settings.main.name.clone(),
             durable.to_owned(),
         );
         let got = got.clone();
@@ -265,7 +265,7 @@ async fn an_event_of_a_type_not_declared_waits_for_a_build_that_declares_it(pool
     // `order.shipped` version 1, which `Orders` does not declare.
     emit_each(&pool, &[shipped("north", 1)]).await;
     let ids = publish(&pool, &events, &[placed(2)]).await;
-    let prefix = &broker.settings.subject_prefix;
+    let prefix = &broker.settings.main.subject_prefix;
     let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
     until("the readable one", || async {
         got.lock().unwrap().len() == 1
@@ -304,7 +304,7 @@ async fn an_event_whose_body_does_not_decode_is_never_delivered_again(pool: PgPo
     .unwrap();
     tx.commit().await.unwrap();
     let ids = publish(&pool, &events, &[placed(2)]).await;
-    let prefix = &broker.settings.subject_prefix;
+    let prefix = &broker.settings.main.subject_prefix;
     let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
     until("the readable one", || async {
         got.lock().unwrap().len() == 1
@@ -327,7 +327,7 @@ async fn an_event_whose_body_does_not_decode_is_never_delivered_again(pool: PgPo
 async fn a_durable_consumer_resumes_where_it_stopped(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     publish(&pool, &events, &[placed(1), placed(2)]).await;
     let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
     until("the first two", || async { got.lock().unwrap().len() == 2 }).await;
@@ -351,7 +351,7 @@ async fn a_durable_consumer_resumes_where_it_stopped(pool: PgPool) {
 async fn a_durable_of_that_name_reading_another_filter_is_refused(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     publish(&pool, &events, &[placed(1)]).await;
     let (task, got) = consuming(&broker, "billing", format!("{prefix}.orders.>"), false);
     until("the first", || async { got.lock().unwrap().len() == 1 }).await;
@@ -363,5 +363,42 @@ async fn a_durable_of_that_name_reading_another_filter_is_refused(pool: PgPool) 
         Err(Error::Misuse(why)) => assert!(why.contains("its filter changed"), "{why}"),
         other => panic!("{other:?}"),
     }
+    broker.done().await;
+}
+
+/// A stream other than the main one is read the same way, by its name and
+/// under its prefix: its events, and none of the main stream's.
+#[sqlx::test(migrations = false)]
+async fn a_consumer_reads_any_stream_declared(pool: PgPool) {
+    let broker = Broker::live().await;
+    let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
+    emit_each(&pool, &[seen("north", 1), seen("south", 2)]).await;
+    emit_each(&pool, &[shipped("north", 3)]).await;
+    while events.pass_now().await.unwrap().unwrap() > 0 {}
+    let live = broker.stream("live").clone();
+    let got: Arc<Mutex<Vec<Seen>>> = Arc::default();
+    let task = tokio::spawn({
+        let (jetstream, got) = (broker.jetstream.clone(), got.clone());
+        async move {
+            consume(
+                &jetstream,
+                &live.name,
+                "screens",
+                &format!("{}.>", live.subject_prefix),
+                move |d: Delivery<Seen>| {
+                    let got = got.clone();
+                    async move {
+                        got.lock().unwrap().push(d.event);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+        }
+    });
+    until("both", || async { got.lock().unwrap().len() == 2 }).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    task.abort();
+    assert_eq!(*got.lock().unwrap(), [seen("north", 1), seen("south", 2)]);
     broker.done().await;
 }
