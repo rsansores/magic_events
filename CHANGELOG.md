@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-11-22
 
 Schema 2: a new step, `magic_events/sql/postgres/2.sql` (`migration(2)`).
 Messages unchanged: an event of the main stream is published as before
