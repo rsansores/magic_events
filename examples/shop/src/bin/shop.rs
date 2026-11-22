@@ -88,7 +88,7 @@ type Answer<T> = Result<Json<T>, (StatusCode, String)>;
 
 async fn status(State(events): State<Arc<Events>>) -> Answer<Status> {
     events
-        .status(&Filter::all())
+        .status(&Filter::main())
         .await
         .map(Json)
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
@@ -96,7 +96,7 @@ async fn status(State(events): State<Arc<Events>>) -> Answer<Status> {
 
 async fn recent(State(events): State<Arc<Events>>) -> Answer<Recent> {
     events
-        .recent(&Filter::all(), 20)
+        .recent(&Filter::main(), 20)
         .await
         .map(Json)
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
