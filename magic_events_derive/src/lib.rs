@@ -217,35 +217,25 @@ fn event_type(ty: &LitStr) -> syn::Result<String> {
     Ok(text)
 }
 
-/// The longest stream key, in bytes: what `Settings::stream` takes.
-const LONGEST_KEY: usize = 32;
-
-/// The stream key, checked: lowercase ASCII letters, digits and `_`,
-/// starting with a letter, 32 bytes at most.
-fn stream_key(key: &LitStr) -> syn::Result<String> {
+/// The check of a stream key, as the code it compiles to: the crate's own
+/// rule (`magic_events::__private::is_key`, which `Settings::stream` holds
+/// keys to as well), asked as a constant, so a key no stream may have fails
+/// the build, pointing at it.
+fn stream_key_check(krate: &TokenStream, key: &LitStr) -> TokenStream {
     let text = key.value();
-    if text.is_empty() {
-        return Err(syn::Error::new(
-            key.span(),
-            "an empty stream key: an event of the main stream says no `stream`, and one of \
-             another names its key, as `live`",
-        ));
+    let refused = if text.is_empty() {
+        "an empty stream key: an event of the main stream says no `stream`, and one of another \
+         names its key, as `live`"
+            .to_owned()
+    } else {
+        format!(
+            "`{text}` is no stream key: one is lowercase ASCII letters, digits and `_`, starting \
+             with a letter, 32 bytes at most, as `live`"
+        )
+    };
+    quote_spanned! {key.span()=>
+        const _: () = ::core::assert!(#krate::__private::is_key(#key), #refused);
     }
-    let valid = text.len() <= LONGEST_KEY
-        && text.starts_with(|c: char| c.is_ascii_lowercase())
-        && text
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if !valid {
-        return Err(syn::Error::new(
-            key.span(),
-            format!(
-                "`{text}` is no stream key: one is lowercase ASCII letters, digits and `_`, \
-                 starting with a letter, 32 bytes at most, as `live`"
-            ),
-        ));
-    }
-    Ok(text)
 }
 
 /// The serde attributes of a type that make its JSON something other than
@@ -279,8 +269,8 @@ struct One {
     subject: Vec<Vec<Part>>,
     subject_span: Span,
     ce_subject: Option<(Vec<Part>, Span)>,
-    /// The key of the stream it goes to: empty for the main one.
-    stream: String,
+    /// The key of the stream it goes to, as written: none for the main one.
+    stream: Option<LitStr>,
 }
 
 impl One {
@@ -298,17 +288,13 @@ impl One {
             Some(lit) => Some((parts(lit)?, lit.span())),
             None => None,
         };
-        let stream = match &args.stream {
-            Some(key) => stream_key(key)?,
-            None => String::new(),
-        };
         Ok(One {
             ty: event_type(&ty)?,
             version: version(&ver)?,
             subject: subject(&subj)?,
             subject_span: subj.span(),
             ce_subject,
-            stream,
+            stream: args.stream,
         })
     }
 
@@ -371,7 +357,7 @@ impl One {
         };
         let ty = &self.ty;
         let version = self.version;
-        let stream = &self.stream;
+        let stream = self.stream.as_ref().map(LitStr::value).unwrap_or_default();
         let variant = match variant {
             Some(i) => quote! { ::std::option::Option::Some(#i) },
             None => quote! { ::std::option::Option::None },
@@ -443,6 +429,8 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
             ),
         ));
     }
+    // The stream keys' checks, one per event that names a stream.
+    let mut checks = Vec::new();
     let (types, body, krate) = match &input.data {
         Data::Struct(data) => {
             let args = Args::parse(&input.attrs, false)?;
@@ -458,6 +446,7 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
             let fields: Vec<Ident> = named.named.iter().filter_map(|f| f.ident.clone()).collect();
             check_named(&one, &fields, &of)?;
             let used = used(&one, &fields);
+            checks.extend(one.stream.as_ref().map(|key| stream_key_check(&krate, key)));
             let describe = one.describe(&krate, &Reach::Named, None);
             let (ty, version) = (&one.ty, one.version);
             (
@@ -571,6 +560,7 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
                         ))
                     }
                 };
+                checks.extend(one.stream.as_ref().map(|key| stream_key_check(&krate, key)));
                 arms.push(arm);
                 let (ty, version) = (&one.ty, one.version);
                 types.push(quote! { (#ty, #version) });
@@ -594,6 +584,8 @@ fn event(input: &DeriveInput) -> syn::Result<TokenStream> {
     };
     let is_enum = matches!(input.data, Data::Enum(_));
     Ok(quote! {
+        #(#checks)*
+
         impl #impl_generics #krate::__private::Sealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics #krate::Event for #name #ty_generics #where_clause {

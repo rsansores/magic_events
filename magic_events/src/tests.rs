@@ -78,12 +78,14 @@ fn named() -> String {
 impl Broker {
     /// The main stream alone.
     pub(crate) async fn new() -> Broker {
-        let settings = Settings::new(named(), "//tests")
-            .storage(Storage::Memory)
-            .idle(Duration::from_millis(10))
-            .standby(Duration::from_millis(10))
-            .backoff(Duration::from_millis(10), Duration::from_millis(80))
-            .send_timeout(Duration::from_secs(5));
+        let settings = Settings::new(
+            StreamSettings::new(named()).storage(Storage::Memory),
+            "//tests",
+        )
+        .idle(Duration::from_millis(10))
+        .standby(Duration::from_millis(10))
+        .backoff(Duration::from_millis(10), Duration::from_millis(80))
+        .send_timeout(Duration::from_secs(5));
         Broker {
             jetstream: jetstream().await,
             settings,
@@ -98,6 +100,13 @@ impl Broker {
             StreamSettings::new(named()).storage(Storage::Memory),
         );
         broker
+    }
+
+    /// The broker's settings, the main stream as `change` makes it.
+    pub(crate) fn main(&self, change: impl FnOnce(StreamSettings) -> StreamSettings) -> Settings {
+        let mut settings = self.settings.clone();
+        settings.main = change(settings.main);
+        settings
     }
 
     /// The settings of the stream `key`: empty for the main one.
@@ -192,12 +201,14 @@ pub(crate) enum Mode {
 
 /// JetStream, failing as a test says: `Mode`, a refusal for good of a
 /// message whose subject holds `poison` while `refusing` is set, and no
-/// acknowledgement ever of one whose subject holds `stall`.
+/// acknowledgement ever of one under the prefix `stalling` names, while it
+/// names one — as from a stream whose leader does not answer.
 #[derive(Clone)]
 pub(crate) struct Faulty {
     pub(crate) jetstream: Context,
     pub(crate) mode: Arc<Mutex<Mode>>,
     pub(crate) refusing: Arc<Mutex<bool>>,
+    pub(crate) stalling: Arc<Mutex<Option<String>>>,
     /// When each message was sent, in order, failed or not.
     pub(crate) sent: Arc<Mutex<Vec<std::time::Instant>>>,
 }
@@ -208,6 +219,7 @@ impl Faulty {
             jetstream,
             mode: Arc::new(Mutex::new(Mode::Up)),
             refusing: Arc::new(Mutex::new(true)),
+            stalling: Arc::default(),
             sent: Arc::default(),
         }
     }
@@ -227,7 +239,13 @@ impl Publish for Faulty {
                     reason: "a message the stream refuses".to_owned(),
                 });
             }
-            if message.subject.contains("stall") {
+            let stalled = self
+                .stalling
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|prefix| message.subject.starts_with(&format!("{prefix}.")));
+            if stalled {
                 let never: Ack = Box::pin(std::future::pending());
                 return Ok(never);
             }
@@ -262,8 +280,19 @@ pub(crate) async fn idle(pool: &PgPool, broker: &Broker, publish: Arc<dyn Publis
     let relay = Events::prepare(pool.clone(), publish, broker.settings.clone())
         .await
         .unwrap();
-    Events::record(&relay).await.unwrap();
+    declare(pool, &relay).await;
     Events::idle(relay, broker.jetstream.clone())
+}
+
+/// `relay`'s streams declared, as a relay that takes the lock declares
+/// them.
+pub(crate) async fn declare(pool: &PgPool, relay: &crate::relay::Relay) {
+    let mut lock = crate::relay::Lock::take(pool, &relay.settings)
+        .await
+        .unwrap()
+        .expect("the lock");
+    relay.declare(&mut lock).await.unwrap();
+    lock.release().await;
 }
 
 /// Emits each of `events` in a transaction of its own.

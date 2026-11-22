@@ -1,7 +1,7 @@
 // Generated from magic_events::status by its test `the_dashboards_types_are_generated_from_these`: UPDATE_CONTRACT=1 rewrites it.
 
 /** The contract these types describe: an answer of another is refused. */
-export const CONTRACT = 1
+export const CONTRACT = 2
 
 /**
  * What `Events::status` answers: the relay, the outbox and the
@@ -13,9 +13,9 @@ export type Status = {
  */
 contract: number, 
 /**
- * The key of the stream it covers: empty for the main one.
+ * The key of the stream it is of: empty for the main one.
  */
-stream_key: string, 
+key: string, 
 /**
  * The subject filter it covers, in full.
  */
@@ -33,16 +33,16 @@ outbox: Outbox,
  */
 relay: Relay, 
 /**
- * Every stream of the outbox — each one declared, and one no longer
- * declared that still has rows — the main one first: only for every
- * subject.
+ * The outbox of every stream — each one the leading relay declares, and
+ * one it does not that still has rows — the main one first: only for
+ * every subject.
  */
-streams: Array<StreamOutbox> | null, 
+outboxes: Array<StreamOutbox> | null, 
 /**
- * What the stream holds under the filter; `None` when the broker could
- * not be reached (`broker_error` says why).
+ * What the JetStream stream holds under the filter; `None` when the
+ * broker could not be reached (`broker_error` says why).
  */
-stream: Stream | null, 
+jetstream: JetStream | null, 
 /**
  * Why the broker's part is missing, when it is.
  */
@@ -145,18 +145,26 @@ last_error: string | null,
 retry_after: string | null, };
 
 /**
- * One stream of the outbox: what waits for it, and how its relay does.
+ * One stream's outbox: what waits for it, and how its relay does.
  */
 export type StreamOutbox = { 
 /**
- * Its key: empty for the main stream.
+ * The stream's key: empty for the main stream.
  */
 key: string, 
 /**
- * The JetStream stream the settings declare it as; `None` when they
- * declare it no longer: nothing publishes what waits for it.
+ * Whether the leading relay declares it: when not, nothing publishes
+ * what waits for it, and `emit` refuses its events.
+ */
+declared: boolean, 
+/**
+ * The JetStream stream a relay last declared it as, if one did.
  */
 name: string | null, 
+/**
+ * The subject prefix a relay last declared it under, if one did.
+ */
+subject_prefix: string | null, 
 /**
  * Rows waiting to be published, parked ones not counted.
  */
@@ -180,12 +188,16 @@ failures: number,
 /**
  * Why the last of them failed.
  */
-last_error: string | null, };
+last_error: string | null, 
+/**
+ * When the relay tries the stream again after them.
+ */
+retry_after: string | null, };
 
 /**
- * What the stream holds under the filter.
+ * What the JetStream stream holds under the filter.
  */
-export type Stream = { 
+export type JetStream = { 
 /**
  * The stream's name.
  */
@@ -284,9 +296,9 @@ export type Recent = {
  */
 contract: number, 
 /**
- * The key of the stream it covers: empty for the main one.
+ * The key of the stream it is of: empty for the main one.
  */
-stream_key: string, 
+key: string, 
 /**
  * The subject filter it covers, in full.
  */

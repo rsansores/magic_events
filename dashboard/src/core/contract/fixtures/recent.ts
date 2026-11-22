@@ -2,8 +2,9 @@
 import type { Recent } from '../types.js'
 
 export default {
-  "contract": 1,
+  "contract": 2,
   "filter": "shop_events.>",
+  "key": "",
   "messages": [
     {
       "body": "{\"store\":\"north\",\"n\":1}",
@@ -50,6 +51,5 @@ export default {
       "subject": "shop_events.orders.south.shipped",
       "time": "2027-01-15T08:00:00.123456Z"
     }
-  ],
-  "stream_key": ""
+  ]
 } satisfies Recent

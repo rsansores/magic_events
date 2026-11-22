@@ -59,6 +59,6 @@ describe('the sentences', () => {
 
   it('refuse an answer of another contract, saying both versions', () => {
     expect(mismatchOf(status, speech.t)).toBeNull()
-    expect(mismatchOf({ contract: 9 }, speech.t)).toMatch(/version 1, and the server answered version 9/)
+    expect(mismatchOf({ contract: 9 }, speech.t)).toMatch(/version 2, and the server answered version 9/)
   })
 })

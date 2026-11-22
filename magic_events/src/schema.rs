@@ -6,6 +6,12 @@ use sqlx::PgConnection;
 
 /// The steps, in order, each as released and never edited: the `n`th (from
 /// 1) brings the tables from version `n - 1` to `n`.
+///
+/// A step that changes a table writers use starts by locking every table it
+/// changes, in the order [`emit`](crate::emit) takes them — `relay`, then
+/// `outbox` — and the others after: writers keep writing while a step runs,
+/// and a step that took `outbox` first would deadlock with an `emit` that
+/// holds `relay` and waits for `outbox`.
 const MIGRATIONS: [&str; SCHEMA_VERSION as usize] = [
     include_str!("../sql/postgres/1.sql"),
     include_str!("../sql/postgres/2.sql"),

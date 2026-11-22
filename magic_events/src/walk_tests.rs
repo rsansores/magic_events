@@ -4,7 +4,8 @@
 //! for a while; afterwards each stream holds exactly what committed to it —
 //! nothing lost, nothing twice, each transaction's events in the order it
 //! emitted them — and the other stream went on publishing while the one
-//! refused.
+//! refused, and while one of its messages waited for an acknowledgement
+//! that did not come.
 //!
 //! Each walk takes a seed, which decides what every writer and the killer
 //! do (the timing is the machine's). The walks take the seeds in [`SEEDS`];
@@ -12,7 +13,7 @@
 //! `random` — and each walk prints the seed it took. A seed worth keeping
 //! joins `SEEDS` with its fix.
 
-use crate::tests::{count, until, Broker, Seen, Shipped};
+use crate::tests::{count, until, Broker, Faulty, Seen, Shipped};
 use crate::Events;
 use async_nats::jetstream::stream::DiscardPolicy;
 use sqlx::PgPool;
@@ -91,7 +92,13 @@ async fn write(pool: PgPool, seed: u64, writer: u64, committed: Committed) {
 /// The killer: relays started with settings of the seed's choosing, and
 /// ended a moment later — stopped, crashed, or their lock's connection
 /// killed — until `writing` says the writers are done.
-async fn kill(pool: PgPool, broker: &Broker, seed: u64, writing: Arc<Mutex<bool>>) -> u64 {
+async fn kill(
+    pool: PgPool,
+    broker: &Broker,
+    faulty: &Faulty,
+    seed: u64,
+    writing: Arc<Mutex<bool>>,
+) -> u64 {
     let mut walk = Walk(seed);
     let mut ended = 0;
     while *writing.lock().unwrap() {
@@ -101,9 +108,14 @@ async fn kill(pool: PgPool, broker: &Broker, seed: u64, writing: Arc<Mutex<bool>
             .clone()
             .in_flight([1, 4, 64][walk.below(3) as usize])
             .batch([1, 7, 256][walk.below(3) as usize]);
-        let events = Events::start(pool.clone(), broker.jetstream.clone(), settings)
-            .await
-            .unwrap();
+        let events = Events::start_with(
+            pool.clone(),
+            broker.jetstream.clone(),
+            Arc::new(faulty.clone()),
+            settings,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(walk.below(20))).await;
         match walk.below(3) {
             0 => events.stop().await,
@@ -153,9 +165,52 @@ async fn refuse_for_a_while(pool: &PgPool, broker: &Broker) {
     set(-1, DiscardPolicy::Old).await;
 }
 
+/// Has a message of `live` wait for an acknowledgement that does not come —
+/// as from a stream whose leader does not answer — and requires the main
+/// stream to publish meanwhile, well within the wait: passes taken one after
+/// the other would hold it until `live`'s gave up.
+async fn stall_for_a_while(pool: &PgPool, broker: &Broker, faulty: &Faulty, committed: &Committed) {
+    *faulty.stalling.lock().unwrap() = Some(broker.stream("live").subject_prefix.clone());
+    let sent = faulty.sent.lock().unwrap().len();
+    let seen = Seen {
+        store: "stall".to_owned(),
+        n: 0,
+    };
+    let shipped = Shipped {
+        store: "stall".to_owned(),
+        n: 0,
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let id = crate::emit(&mut tx, &seen).await.unwrap();
+    tx.commit().await.unwrap();
+    committed.lock().unwrap().push(vec![("live", id)]);
+    until("`live`'s message sent, and waiting", || async {
+        faulty.sent.lock().unwrap().len() > sent
+    })
+    .await;
+    let before = broker.messages().await.len();
+    let started = std::time::Instant::now();
+    let mut tx = pool.begin().await.unwrap();
+    let id = crate::emit(&mut tx, &shipped).await.unwrap();
+    tx.commit().await.unwrap();
+    committed.lock().unwrap().push(vec![("", id)]);
+    until("the main stream publishes", || async {
+        broker.messages().await.len() > before
+    })
+    .await;
+    assert!(
+        started.elapsed() < broker.settings.send_timeout / 2,
+        "the main stream waited for `live`: {:?}",
+        started.elapsed()
+    );
+    *faulty.stalling.lock().unwrap() = None;
+}
+
 async fn walk(pool: &PgPool, seed: u64) {
     eprintln!("walk: seed {seed} (MAGIC_EVENTS_WALK_SEEDS={seed} takes it again)");
-    let broker = Broker::live().await;
+    let mut broker = Broker::live().await;
+    // What `live`'s stalled message waits, at most.
+    broker.settings = broker.settings.send_timeout(Duration::from_secs(1));
     // Both streams declared, as a host's first start does, before anything
     // emits to them.
     Events::start(
@@ -172,7 +227,8 @@ async fn walk(pool: &PgPool, seed: u64) {
     let writers = (0..WRITERS)
         .map(|writer| tokio::spawn(write(pool.clone(), seed, writer, committed.clone())));
     let writers = futures_join(writers.collect());
-    let killer = kill(pool.clone(), &broker, seed, writing.clone());
+    let faulty = Faulty::new(broker.jetstream.clone());
+    let killer = kill(pool.clone(), &broker, &faulty, seed, writing.clone());
     // The relays keep starting and ending until the writers are done and
     // `live` took messages again.
     let ((), ended) = tokio::join!(
@@ -183,17 +239,18 @@ async fn walk(pool: &PgPool, seed: u64) {
         killer
     );
     // A relay that runs to the end publishes what is left.
-    let last = Events::start(
+    let last = Events::start_with(
         pool.clone(),
         broker.jetstream.clone(),
+        Arc::new(faulty.clone()),
         broker.settings.clone(),
     )
     .await
     .unwrap();
-    until("the outbox drained", || async {
-        count(pool, "SELECT count(*) FROM magic_events.outbox").await == 0
-    })
-    .await;
+    let drained = || async { count(pool, "SELECT count(*) FROM magic_events.outbox").await == 0 };
+    until("the outbox drained", drained).await;
+    stall_for_a_while(pool, &broker, &faulty, &committed).await;
+    until("the outbox drained", drained).await;
     last.stop().await;
 
     let committed = committed.lock().unwrap().clone();

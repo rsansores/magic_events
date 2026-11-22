@@ -179,6 +179,8 @@ pub mod __private {
         pub stream: &'static str,
     }
 
+    pub use crate::settings::is_key;
+
     /// Writes `value` at the end of `out`.
     pub fn push<T: std::fmt::Display + ?Sized>(out: &mut String, value: &T) {
         let _ = write!(out, "{value}");

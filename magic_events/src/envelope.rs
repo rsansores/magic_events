@@ -279,7 +279,7 @@ pub(crate) struct Pending {
     pub(crate) ty: String,
     pub(crate) headers: sqlx::types::Json<serde_json::Map<String, serde_json::Value>>,
     pub(crate) body: Vec<u8>,
-    pub(crate) emitted_at: DateTime<Utc>,
+    pub(crate) occurred_at: DateTime<Utc>,
 }
 
 /// The message of a row: its full subject, and its headers, in the order
@@ -314,7 +314,8 @@ impl Pending {
             ),
             (
                 "ce-time",
-                self.emitted_at.to_rfc3339_opts(SecondsFormat::Micros, true),
+                self.occurred_at
+                    .to_rfc3339_opts(SecondsFormat::Micros, true),
             ),
             ("ce-datacontenttype", CONTENT_TYPE.to_owned()),
         ];

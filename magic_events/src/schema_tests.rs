@@ -181,13 +181,13 @@ async fn a_database_of_version_1_upgrades_in_place(pool: PgPool) {
 
     Events::install(&pool).await.unwrap();
     assert_eq!(installed(&pool).await, Some(SCHEMA_VERSION));
-    let relay: Vec<(String, Option<i32>, Option<i32>, i32)> = sqlx::query_as(
-        "SELECT stream, id, max_body, failures FROM magic_events.relay ORDER BY stream",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(relay, [(String::new(), Some(1), Some(1000), 2)]);
+    // One row, the main stream's: as it was, and declared.
+    let relay: (String, Option<i32>, Option<i32>, i32, bool) =
+        sqlx::query_as("SELECT stream, id, max_body, failures, declared FROM magic_events.relay")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(relay, (String::new(), Some(1), Some(1000), 2, true));
     assert_eq!(
         count(
             &pool,
@@ -205,6 +205,17 @@ async fn a_database_of_version_1_upgrades_in_place(pool: PgPool) {
         5
     );
     v1_emit(&pool, "east").await;
+    // A relay of 0.1, still leading: its read fails, and it publishes
+    // nothing — of the main stream's, or of another's under its prefix.
+    let v1_read = sqlx::query(
+        "SELECT id, event_id, subject, type, headers, body, emitted_at \
+           FROM magic_events.outbox WHERE parked_at IS NULL ORDER BY id LIMIT 256",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(v1_read.contains("emitted_at"), "{v1_read}");
 
     let broker = Broker::new().await;
     let events = Events::start(
@@ -239,4 +250,54 @@ async fn a_database_of_version_1_upgrades_in_place(pool: PgPool) {
         8
     );
     broker.done().await;
+}
+
+/// A writer in the middle of an `emit` — the relay row read, the outbox not
+/// written yet — while step 2 runs: the step waits for it, and the two
+/// never deadlock.
+#[sqlx::test(migrations = false)]
+async fn a_writer_in_the_middle_of_an_emit_and_step_2_take_turns(pool: PgPool) {
+    sqlx::raw_sql(&migration(1).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    // `emit` in two statements, so the step can come between them.
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("SELECT max_body FROM magic_events.relay WHERE id = 1")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let install = tokio::spawn({
+        let pool = pool.clone();
+        async move { Events::install(&pool).await }
+    });
+    until("the step waits for the writer", || async {
+        count(
+            &pool,
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .await
+            == 1
+    })
+    .await;
+    sqlx::query(
+        "INSERT INTO magic_events.outbox (event_id, subject, type, headers, body) \
+         VALUES ($1, 'orders.north.shipped', 'order.shipped.v1', '{}', '\\x7b7d')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .execute(&mut *writer)
+    .await
+    .unwrap();
+    writer.commit().await.unwrap();
+    install.await.unwrap().unwrap();
+    assert_eq!(installed(&pool).await, Some(SCHEMA_VERSION));
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM magic_events.outbox WHERE stream = ''"
+        )
+        .await,
+        1
+    );
 }

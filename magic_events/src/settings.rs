@@ -28,8 +28,8 @@ pub(crate) const LONGEST_PREFIX: usize = 255;
 /// a type to it.
 pub(crate) const LONGEST_TYPE: usize = 255;
 
-/// The longest stream key, in bytes: the derive holds a key to it.
-pub(crate) const LONGEST_KEY: usize = 32;
+/// The longest stream key, in bytes.
+const LONGEST_KEY: usize = 32;
 
 /// Where the stream keeps its messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +42,9 @@ pub enum Storage {
 }
 
 /// One JetStream stream the relay publishes to: its name, its subject
-/// prefix, and what it keeps. [`Settings::new`] names the main stream, and
-/// its setters set it; [`Settings::stream`] declares another with these.
+/// prefix, and what it keeps. [`Settings::new`] takes the main stream's —
+/// or only its name, every other setting the default — and
+/// [`Settings::stream`] declares another with these.
 ///
 /// ```
 /// use magic_events::StreamSettings;
@@ -205,6 +206,27 @@ impl StreamSettings {
     }
 }
 
+/// A stream of that name, every other setting the default.
+impl From<&str> for StreamSettings {
+    fn from(name: &str) -> Self {
+        StreamSettings::new(name)
+    }
+}
+
+/// A stream of that name, every other setting the default.
+impl From<String> for StreamSettings {
+    fn from(name: String) -> Self {
+        StreamSettings::new(name)
+    }
+}
+
+/// A stream of that name, every other setting the default.
+impl From<&String> for StreamSettings {
+    fn from(name: &String) -> Self {
+        StreamSettings::new(name)
+    }
+}
+
 /// One stream the settings declare: its key — empty for the main stream —
 /// and its settings.
 #[derive(Clone, Copy, Debug)]
@@ -214,17 +236,18 @@ pub(crate) struct Declared<'a> {
 }
 
 /// How the relay runs, and the streams it publishes to. [`Settings::new`]
-/// names the main stream and the events' source; [`Settings::stream`]
+/// takes the main stream and the events' source; [`Settings::stream`]
 /// declares another stream; everything else has a default and a setter.
 ///
 /// ```
 /// use magic_events::{Settings, StreamSettings};
 /// use std::time::Duration;
 ///
-/// let settings = Settings::new("SHOP_EVENTS", "shop")
-///     .retention(Duration::from_secs(30 * 24 * 60 * 60))
-///     .replicas(3)
-///     .stream("live", StreamSettings::new("SHOP_LIVE").retention(Duration::from_secs(600)));
+/// let settings = Settings::new(
+///     StreamSettings::new("SHOP_EVENTS").retention(Duration::from_secs(30 * 24 * 60 * 60)),
+///     "shop",
+/// )
+/// .stream("live", StreamSettings::new("SHOP_LIVE").retention(Duration::from_secs(600)));
 /// ```
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -246,17 +269,16 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The relay of the main JetStream stream `stream`, its events'
-    /// CloudEvents `source` the URI-reference `source` (`"shop"`,
-    /// `"//shop.example.com"`). Every subject is the subject prefix — the
-    /// stream's name in lowercase, unless [`Settings::subject_prefix`] says
-    /// otherwise — then a dot, then the event's own subject. An event goes
-    /// to the main stream unless it names another (`#[event(stream = …)]`).
+    /// The relay of the main stream `stream` — its name, as
+    /// `"SHOP_EVENTS"`, or all its settings, as a [`StreamSettings`] — its
+    /// events' CloudEvents `source` the URI-reference `source` (`"shop"`,
+    /// `"//shop.example.com"`). An event goes to the main stream unless it
+    /// names another (`#[event(stream = …)]`).
     #[must_use]
-    pub fn new(stream: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(stream: impl Into<StreamSettings>, source: impl Into<String>) -> Self {
         Settings {
             source: source.into(),
-            main: StreamSettings::new(stream),
+            main: stream.into(),
             others: Vec::new(),
             idle: Duration::from_millis(200),
             batch: 256,
@@ -273,67 +295,15 @@ impl Settings {
     /// names — as `stream`: a JetStream stream of its own, with its own
     /// subject prefix, retention and `max_body`, its own passes and its own
     /// backoff, so a stream the broker fails holds back no other. One relay
-    /// publishes every stream declared. A key is lowercase ASCII letters,
-    /// digits and `_`, starting with a letter; [`Events::start`] refuses a
-    /// key declared twice, two keys of one stream name, and subject prefixes
-    /// one of which takes another's subjects.
+    /// publishes every stream it declares. A key is lowercase ASCII
+    /// letters, digits and `_`, starting with a letter; [`Events::start`]
+    /// refuses a key declared twice, two keys of one stream name, and
+    /// subject prefixes one of which takes another's subjects.
     ///
     /// [`Events::start`]: crate::Events::start
     #[must_use]
     pub fn stream(mut self, key: impl Into<String>, stream: StreamSettings) -> Self {
         self.others.push((key.into(), stream));
-        self
-    }
-
-    /// The main stream's first subject tokens: one token or several, joined
-    /// by dots (`"shop.events"`). The lowercase stream name by default.
-    #[must_use]
-    pub fn subject_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.main = self.main.subject_prefix(prefix);
-        self
-    }
-
-    /// How long the main stream keeps a message (its `max_age`): 7 days by
-    /// default. A consumer that is away longer misses what expired.
-    #[must_use]
-    pub fn retention(mut self, retention: Duration) -> Self {
-        self.main = self.main.retention(retention);
-        self
-    }
-
-    /// How long the main stream remembers a message's id, and drops a
-    /// message sent again under it: 2 minutes by default. A relay that died
-    /// after the stream took a message, and before it deleted its row, sends
-    /// it again; within the window that is no duplicate.
-    #[must_use]
-    pub fn duplicate_window(mut self, window: Duration) -> Self {
-        self.main = self.main.duplicate_window(window);
-        self
-    }
-
-    /// Where the main stream keeps its messages: [`Storage::File`] by
-    /// default. Set when the stream is created; a stream's storage does not
-    /// change.
-    #[must_use]
-    pub fn storage(mut self, storage: Storage) -> Self {
-        self.main = self.main.storage(storage);
-        self
-    }
-
-    /// How many servers of the cluster hold the main stream: 1 by default.
-    #[must_use]
-    pub fn replicas(mut self, replicas: usize) -> Self {
-        self.main = self.main.replicas(replicas);
-        self
-    }
-
-    /// Whether the relay creates the main stream, and brings it to these
-    /// settings (`true`, the default), or only requires that it exists and
-    /// takes every subject under the prefix (`false`): the stream is then
-    /// the operator's, with its own retention.
-    #[must_use]
-    pub fn manage_stream(mut self, manage: bool) -> Self {
-        self.main = self.main.manage_stream(manage);
         self
     }
 
@@ -388,19 +358,11 @@ impl Settings {
         self
     }
 
-    /// The largest body, in bytes, [`emit`](crate::emit) takes for an event
-    /// of the main stream: 64 KiB by default. Held to the broker's
-    /// `max_payload` when the relay starts.
-    #[must_use]
-    pub fn max_body(mut self, bytes: u32) -> Self {
-        self.main = self.main.max_body(bytes);
-        self
-    }
-
     /// The database role the crate's own work runs as: the relay's session,
     /// and the transactions of [`Events::start`](crate::Events::start),
-    /// [`Events::status`](crate::Events::status) and
-    /// [`Events::unpark`](crate::Events::unpark). The role the pool logs in
+    /// [`Events::status`](crate::Events::status),
+    /// [`Events::unpark`](crate::Events::unpark) and
+    /// [`Events::retire`](crate::Events::retire). The role the pool logs in
     /// as by default. With one, the pool's login role must be allowed to
     /// `SET ROLE` to it, and the grants the relay needs are this role's:
     /// a host whose transactions each assume a role of their own — under row
@@ -542,13 +504,22 @@ impl Settings {
 }
 
 /// Whether `key` may name a stream: lowercase ASCII letters, digits and
-/// `_`, starting with a letter, 32 bytes at most.
-pub(crate) fn is_key(key: &str) -> bool {
-    key.len() <= LONGEST_KEY
-        && key.starts_with(|c: char| c.is_ascii_lowercase())
-        && key
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+/// `_`, starting with a letter, 32 bytes at most. The derive's code asks it
+/// of every `stream = …` as it compiles, so a key is held to one rule.
+pub const fn is_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    if bytes.is_empty() || bytes.len() > LONGEST_KEY || !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_') {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Whether `token` may be one token of a subject: not empty, printable
@@ -571,13 +542,24 @@ mod tests {
             "shop_events"
         );
         assert_eq!(
-            Settings::new("SHOP_EVENTS", "shop")
-                .subject_prefix("shop.events")
-                .main
-                .subject_prefix,
+            Settings::new(
+                StreamSettings::new("SHOP_EVENTS").subject_prefix("shop.events"),
+                "shop"
+            )
+            .main
+            .subject_prefix,
             "shop.events"
         );
         assert_eq!(StreamSettings::new("SHOP_LIVE").subject_prefix, "shop_live");
+        // The main stream by its name alone, however a host holds it.
+        let name = "SHOP_EVENTS".to_owned();
+        for settings in [
+            Settings::new("SHOP_EVENTS", "shop"),
+            Settings::new(&name, "shop"),
+            Settings::new(name.clone(), "shop"),
+        ] {
+            assert_eq!(settings.main.name, "SHOP_EVENTS");
+        }
         assert!(Settings::new("SHOP_EVENTS", "shop").check().is_ok());
     }
 
@@ -606,6 +588,10 @@ mod tests {
     #[test]
     fn settings_the_relay_cannot_run_with_are_refused() {
         let base = || Settings::new("SHOP", "shop");
+        // The main stream `SHOP` as `with` makes it.
+        let main = |with: fn(StreamSettings) -> StreamSettings| {
+            Settings::new(with(StreamSettings::new("SHOP")), "shop")
+        };
         let live = || StreamSettings::new("LIVE");
         for (settings, what) in [
             (Settings::new("SHOP.EVENTS", "shop"), "stream name"),
@@ -613,19 +599,20 @@ mod tests {
             (Settings::new("", "shop"), "stream name"),
             (Settings::new("SHOP", ""), "source"),
             (Settings::new("SHOP", "x".repeat(1025)), "source"),
-            (base().subject_prefix("x".repeat(256)), "prefix"),
-            (base().subject_prefix("shop.*"), "prefix"),
-            (base().subject_prefix("shop..x"), "prefix"),
-            (base().subject_prefix(""), "prefix"),
+            (main(|s| s.subject_prefix("x".repeat(256))), "prefix"),
+            (main(|s| s.subject_prefix("shop.*")), "prefix"),
+            (main(|s| s.subject_prefix("shop..x")), "prefix"),
+            (main(|s| s.subject_prefix("")), "prefix"),
             (base().idle(Duration::ZERO), "`idle`"),
             (
                 base().backoff(Duration::from_secs(2), Duration::from_secs(1)),
                 "`backoff`",
             ),
             (
-                base()
-                    .retention(Duration::from_secs(60))
-                    .duplicate_window(Duration::from_secs(120)),
+                main(|s| {
+                    s.retention(Duration::from_secs(60))
+                        .duplicate_window(Duration::from_secs(120))
+                }),
                 "`duplicate_window`",
             ),
             (base().in_flight(0), "`in_flight`"),
@@ -634,8 +621,8 @@ mod tests {
                 "a takeover may take",
             ),
             (base().batch(0), "`batch`"),
-            (base().max_body(0), "`max_body`"),
-            (base().replicas(0), "`replicas`"),
+            (main(|s| s.max_body(0)), "`max_body`"),
+            (main(|s| s.replicas(0)), "`replicas`"),
             (base().stream("Live", live()), "no stream key"),
             (base().stream("", live()), "an empty stream key"),
             (base().stream("2live", live()), "no stream key"),
@@ -668,8 +655,7 @@ mod tests {
                  (`shop.live`) overlap",
             ),
             (
-                base()
-                    .subject_prefix("shop.events")
+                main(|s| s.subject_prefix("shop.events"))
                     .stream("live", live().subject_prefix("shop")),
                 "overlap",
             ),
@@ -687,8 +673,7 @@ mod tests {
             }
         }
         // Prefixes that share text, and no token, do not overlap.
-        assert!(base()
-            .subject_prefix("shop.events")
+        assert!(main(|s| s.subject_prefix("shop.events"))
             .stream("live", live().subject_prefix("shop.events_live"))
             .check()
             .is_ok());

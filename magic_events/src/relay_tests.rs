@@ -229,12 +229,10 @@ async fn a_message_published_and_not_deleted_is_held_once(pool: PgPool) {
     let broker = Broker::new().await;
     let events = idle(&pool, &broker, Arc::new(broker.jetstream.clone())).await;
     emit_each(&pool, &[shipped("north", 1), shipped("north", 2)]).await;
-    let mut lock = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
     let relay = events_relay(&events);
-    let mut rows = relay.pending(&mut lock, main(relay)).await.unwrap();
+    let mut rows = relay.pending(main(relay)).await.unwrap();
     let published = relay.send(main(relay), &mut rows).await;
     assert_eq!((published.acked, published.failure), (2, None));
-    lock.release().await;
     assert_eq!(
         count(&pool, "SELECT count(*) FROM magic_events.outbox").await,
         2
@@ -321,7 +319,7 @@ async fn a_message_refused_for_good_is_parked_and_holds_back_nothing(pool: PgPoo
         count(&pool, "SELECT count(*) FROM magic_events.outbox").await,
         0
     );
-    assert_eq!(events.unpark_all(&Filter::all()).await.unwrap(), 0);
+    assert_eq!(events.unpark_all(&Filter::main()).await.unwrap(), 0);
     broker.done().await;
 }
 
@@ -366,7 +364,7 @@ async fn a_relay_that_lost_its_lock_commits_nothing(pool: PgPool) {
     emit_each(&pool, &[shipped("north", 1)]).await;
     let relay = events_relay(&events);
     let mut lock = Lock::take(&pool, &waiting(WAIT)).await.unwrap().unwrap();
-    let mut rows = relay.pending(&mut lock, main(relay)).await.unwrap();
+    let mut rows = relay.pending(main(relay)).await.unwrap();
     let published = relay.send(main(relay), &mut rows).await;
     sqlx::query(
         "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' \
@@ -445,14 +443,25 @@ async fn a_relay_the_database_does_not_answer_lets_its_lock_go(pool: PgPool) {
         .unwrap();
     assert_eq!(user_timeout, "20000");
 
+    let relay = events_relay(&events);
+    let mut rows = relay.pending(main(relay)).await.unwrap();
+    let published = relay.send(main(relay), &mut rows).await;
     let mut blocker = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE magic_events.outbox IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let relay = events_relay(&events);
-    assert!(relay.pending(&mut lock, main(relay)).await.is_err());
+    assert!(relay
+        .settle(
+            &mut lock,
+            main(relay),
+            &rows,
+            published,
+            Duration::from_millis(10)
+        )
+        .await
+        .is_err());
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "{:?}",
@@ -571,22 +580,17 @@ async fn a_stream_waiting_on_the_broker_holds_back_no_other(pool: PgPool) {
     let mut broker = Broker::live().await;
     broker.settings = broker.settings.send_timeout(Duration::from_secs(2));
     let faulty = Faulty::new(broker.jetstream.clone());
+    *faulty.stalling.lock().unwrap() = Some(broker.stream("live").subject_prefix.clone());
     Events::install(&pool).await.unwrap();
-    for declared in broker.settings.declared() {
-        crate::stream::ensure(&broker.jetstream, declared.stream)
-            .await
-            .unwrap();
-    }
-    let relay = Events::prepare(
+    let events = Events::start_with(
         pool.clone(),
+        broker.jetstream.clone(),
         Arc::new(faulty.clone()),
         broker.settings.clone(),
     )
     .await
     .unwrap();
-    Events::record(&relay).await.unwrap();
-    let events = Events::spawn(relay, broker.jetstream.clone());
-    emit_each(&pool, &[seen("stall", 1)]).await;
+    emit_each(&pool, &[seen("north", 1)]).await;
     until("the live message sent", || async {
         !faulty.sent.lock().unwrap().is_empty()
     })
@@ -642,7 +646,7 @@ async fn a_message_parked_on_one_stream_is_that_streams(pool: PgPool) {
         1
     );
     assert_eq!(
-        events.unpark_all(&Filter::all()).await.unwrap(),
+        events.unpark_all(&Filter::main()).await.unwrap(),
         0,
         "none of the main stream's"
     );
@@ -650,5 +654,71 @@ async fn a_message_parked_on_one_stream_is_that_streams(pool: PgPool) {
     assert_eq!(events.unpark_all(&Filter::stream("live")).await.unwrap(), 1);
     drain(&events).await;
     assert_eq!(broker.bodies_of("live").await.len(), 2);
+    broker.done().await;
+}
+
+/// Stopped, and its lock lost before the relay has finished stopping: it
+/// stops, as told — it does not stand by again, waiting on a shutdown that
+/// came already.
+#[sqlx::test(migrations = false)]
+async fn a_relay_stopped_as_it_loses_its_lock_stops(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    crate::stream::ensure(&broker.jetstream, &broker.settings.main)
+        .await
+        .unwrap();
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    // The row locked, so the pass's settling waits, holding the lock's
+    // connection, and the check of the lock waits behind it.
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM magic_events.outbox FOR UPDATE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let relay = Arc::new(
+        Events::prepare(
+            pool.clone(),
+            Arc::new(broker.jetstream.clone()),
+            broker.settings.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn({
+        let relay = relay.clone();
+        async move {
+            relay
+                .run(async move {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    until("the pass settles behind the row's lock", || async {
+        count(
+            &pool,
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .await
+            == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' \
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("it stops")
+        .expect("and does not panic");
+    blocker.rollback().await.unwrap();
     broker.done().await;
 }

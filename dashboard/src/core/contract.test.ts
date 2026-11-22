@@ -32,6 +32,6 @@ describe('the relay’s answers', () => {
     expect(status.published).not.toBeNull()
     expect(narrowed.consumers).toBeNull()
     expect(narrowed.published).toBeNull()
-    expect(narrowed.stream?.bytes).toBeNull()
+    expect(narrowed.jetstream?.bytes).toBeNull()
   })
 })

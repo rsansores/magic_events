@@ -30,7 +30,7 @@ describe('useEventsView', () => {
     expect(v.banner.value?.mood).toBe('down')
     expect(v.consumers.value?.map((c) => c.name)).toEqual(['billing', 'shipping'])
     expect(v.streams.value?.map((s) => s.key)).toEqual(['', 'live'])
-    answer.value = { ...status, streams: status.streams!.slice(0, 1) }
+    answer.value = { ...status, outboxes: status.outboxes!.slice(0, 1) }
     expect(v.streams.value, 'one stream, the answered one: nothing to list').toBeNull()
     answer.value = narrowed
     expect(v.streams.value).toBeNull()
@@ -41,8 +41,8 @@ describe('useEventsView', () => {
   })
 
   it('refuses an answer of another contract', () => {
-    const { v, scope } = view({ ...status, contract: 2 })
-    expect(v.error.value).toMatch(/version 1, and the server answered version 2/)
+    const { v, scope } = view({ ...status, contract: 1 })
+    expect(v.error.value).toMatch(/version 2, and the server answered version 1/)
     expect(v.status.value).toBeNull()
     expect(v.banner.value).toBeNull()
     scope.stop()
@@ -54,9 +54,9 @@ describe('useEventsView', () => {
     expect(v.recent.value?.map((m) => m.sequence)).toEqual(
       [...recent.messages].map((m) => m.sequence).reverse(),
     )
-    recentRef.value = { ...recent, contract: 2 }
+    recentRef.value = { ...recent, contract: 1 }
     expect(v.recent.value).toBeNull()
-    expect(v.recentError.value).toMatch(/version 1, and the server answered version 2/)
+    expect(v.recentError.value).toMatch(/version 2, and the server answered version 1/)
     scope.stop()
   })
 })

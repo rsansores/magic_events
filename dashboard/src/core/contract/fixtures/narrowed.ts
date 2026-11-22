@@ -5,23 +5,9 @@ export default {
   "at": "2027-01-15T08:00:00.123456Z",
   "broker_error": null,
   "consumers": null,
-  "contract": 1,
+  "contract": 2,
   "filter": "shop_events.orders.north.>",
-  "outbox": {
-    "first_parked": [],
-    "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
-    "parked": 0,
-    "pending": 1
-  },
-  "published": null,
-  "relay": {
-    "failures": 0,
-    "last_error": null,
-    "last_published_at": "2027-01-15T08:00:00.123456Z",
-    "retry_after": null,
-    "running": false
-  },
-  "stream": {
+  "jetstream": {
     "bytes": null,
     "first_at": null,
     "last_at": null,
@@ -35,6 +21,20 @@ export default {
     ],
     "subjects_total": 1
   },
-  "stream_key": "",
-  "streams": null
+  "key": "",
+  "outbox": {
+    "first_parked": [],
+    "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
+    "parked": 0,
+    "pending": 1
+  },
+  "outboxes": null,
+  "published": null,
+  "relay": {
+    "failures": 0,
+    "last_error": null,
+    "last_published_at": "2027-01-15T08:00:00.123456Z",
+    "retry_after": null,
+    "running": false
+  }
 } satisfies Status

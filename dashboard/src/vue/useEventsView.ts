@@ -77,10 +77,10 @@ export function useEventsView(
     usable.value?.consumers ? consumersOf(usable.value, toValue(options.consumerLag)) : null,
   )
   /** Every stream of the outbox, when there is more than the one the
-   * answer is of, or one no settings declare; null for a narrowed view. */
+   * answer is of; null for a narrowed view. */
   const streams = computed(() => {
     const rows = usable.value ? streamsOf(usable.value) : []
-    return rows.length > 1 || rows.some((s) => s.name == null) ? rows : null
+    return rows.length > 1 ? rows : null
   })
   const published = computed(() =>
     usable.value?.published

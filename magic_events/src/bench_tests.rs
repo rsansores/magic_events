@@ -64,11 +64,8 @@ async fn bench_relay_throughput(pool: PgPool) {
     crate::Events::install(&pool).await.unwrap();
     for in_flight in [1, 16, 64] {
         let mut broker = Broker::new().await;
-        broker.settings = broker
-            .settings
-            .clone()
-            .storage(crate::Storage::File)
-            .in_flight(in_flight);
+        broker.settings.main = broker.settings.main.storage(crate::Storage::File);
+        broker.settings = broker.settings.in_flight(in_flight);
         let mut tx = pool.begin().await.unwrap();
         for n in 0..EVENTS {
             crate::emit(&mut tx, &shipped("north", n)).await.unwrap();

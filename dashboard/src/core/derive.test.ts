@@ -95,8 +95,8 @@ describe('healthOf', () => {
 
   it('is stuck while events wait for a stream no relay declares any more, and names it', () => {
     const undeclared = with_((s) => {
-      s.streams![1]!.name = null
-      s.streams![1]!.parked = 2
+      s.outboxes![1]!.declared = false
+      s.outboxes![1]!.parked = 2
     }, calm)
     expect(healthOf(undeclared, { now: at })).toEqual({
       mood: 'stuck',
@@ -121,7 +121,7 @@ describe('healthOf', () => {
 describe('the rest of what an answer comes to', () => {
   it('reads only its own contract', () => {
     expect(readsContract(status)).toBe(true)
-    expect(readsContract({ contract: 2 })).toBe(false)
+    expect(readsContract({ contract: 1 })).toBe(false)
   })
 
   it('lists the consumers furthest behind first', () => {
@@ -133,11 +133,18 @@ describe('the rest of what an answer comes to', () => {
   })
 
   it('lists every stream of the outbox, the main one first, the one answered marked', () => {
-    expect(streamsOf(status).map((s) => [s.key, s.name, s.pending, s.parked, s.current])).toEqual([
-      ['', 'SHOP_EVENTS', 1, 1, true],
-      ['live', 'SHOP_LIVE', 1, 0, false],
-    ])
-    expect(streamsOf(status)[1]).toMatchObject({ failures: 0, lastError: null, lastPublished: at })
+    expect(streamsOf(status).map((s) => [s.key, s.declared, s.name, s.pending, s.parked, s.current])).toEqual(
+      [
+        ['', true, 'SHOP_EVENTS', 1, 1, true],
+        ['live', true, 'SHOP_LIVE', 1, 0, false],
+      ],
+    )
+    expect(streamsOf(status)[1]).toMatchObject({
+      failures: 0,
+      lastError: null,
+      retryAt: null,
+      lastPublished: at,
+    })
     expect(streamsOf(narrowed)).toEqual([])
   })
 

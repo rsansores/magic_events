@@ -1,5 +1,5 @@
-error: `Live-Screens` is no stream key: one is lowercase ASCII letters, digits and `_`, starting with a letter, 32 bytes at most, as `live`
+error[E0080]: evaluation panicked: `Live-Screens` is no stream key: one is lowercase ASCII letters, digits and `_`, starting with a letter, 32 bytes at most, as `live`
  --> tests/derive/fail/stream_not_a_key.rs:2:77
   |
 2 | #[event(type = "order.seen", version = 1, subject = "orders.seen", stream = "Live-Screens")]
-  |                                                                             ^^^^^^^^^^^^^^
+  |                                                                             ^^^^^^^^^^^^^^ evaluation of `_` failed here
