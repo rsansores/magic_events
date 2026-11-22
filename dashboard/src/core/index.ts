@@ -2,8 +2,16 @@
 // dashboard works out from them and says — no framework.
 
 export * from './contract/types.js'
-export { readsContract, healthOf, consumersOf, publishedByDay, publishedByType, recentOf } from './derive.js'
-export type { Mood, Reason, Health, HealthOptions, ConsumerRow, RecentRow } from './derive.js'
+export {
+  readsContract,
+  healthOf,
+  consumersOf,
+  streamsOf,
+  publishedByDay,
+  publishedByType,
+  recentOf,
+} from './derive.js'
+export type { Mood, Reason, Health, HealthOptions, ConsumerRow, StreamRow, RecentRow } from './derive.js'
 export { mismatchOf, bannerOf, describeReason, describeLastPublished, describeSince } from './describe.js'
 export type { Speech, Banner } from './describe.js'
 export { parseTimestamp, serverNow, timeOf } from './time.js'

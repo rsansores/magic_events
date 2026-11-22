@@ -1,7 +1,7 @@
 // What a dashboard works out from the relay's answers: pure functions of an
 // answer and the database's time now, no framework, no words.
 
-import { CONTRACT, type Consumer, type Recent, type Status } from './contract/types.js'
+import { CONTRACT, type Consumer, type Recent, type Status, type StreamOutbox } from './contract/types.js'
 import { timeOf } from './time.js'
 
 /** How the events are doing, in one word, worst last: `ok`, `lagging` (they
@@ -19,6 +19,7 @@ export type Reason =
   | { kind: 'parked'; n: number }
   | { kind: 'backlog'; n: number; since: number; mood: 'lagging' | 'stuck' }
   | { kind: 'consumer_behind'; name: string; n: number }
+  | { kind: 'stream_undeclared'; key: string; n: number }
 
 export interface HealthOptions {
   /** The database's time now, in ms since the epoch (`serverNow`). */
@@ -46,6 +47,7 @@ const moodOf = (r: Reason): Mood => {
     case 'broker_unreachable':
       return 'down'
     case 'parked':
+    case 'stream_undeclared':
       return 'stuck'
     case 'backlog':
       return r.mood
@@ -87,6 +89,10 @@ export function healthOf(status: Status, options: HealthOptions): Health {
   }
   for (const c of status.consumers ?? [])
     if (c.pending >= consumerLag) reasons.push({ kind: 'consumer_behind', name: c.name, n: c.pending })
+  // A stream no settings declare any more has nobody to publish what waits
+  // for it: no dashboard of its own will say so.
+  for (const s of status.streams ?? [])
+    if (s.name == null) reasons.push({ kind: 'stream_undeclared', key: s.key, n: s.pending + s.parked })
   reasons.sort((a, b) => SEVERITY[moodOf(b)] - SEVERITY[moodOf(a)])
   const mood = reasons.reduce<Mood>(
     (worst, r) => (SEVERITY[moodOf(r)] > SEVERITY[worst] ? moodOf(r) : worst),
@@ -121,6 +127,41 @@ export function consumersOf(status: Status, consumerLag = 1_000): ConsumerRow[] 
       behind: c.pending >= consumerLag,
     }))
     .sort((a, b) => b.pending - a.pending || a.name.localeCompare(b.name))
+}
+
+/** One stream of the outbox, as a row of a table. */
+export interface StreamRow {
+  /** Its key: empty for the main stream. */
+  key: string
+  /** The JetStream stream it is; `null` when no settings declare it any
+   * more. */
+  name: string | null
+  pending: number
+  parked: number
+  /** When the oldest event waiting was emitted, in ms; `null` for none. */
+  oldestPending: number | null
+  /** When it last published, in ms; `null` for never. */
+  lastPublished: number | null
+  failures: number
+  lastError: string | null
+  /** Whether it is the stream the answer is of. */
+  current: boolean
+}
+
+/** Every stream of the outbox, the main one first; none for a narrowed
+ * answer. */
+export function streamsOf(status: Status): StreamRow[] {
+  return (status.streams ?? []).map((s: StreamOutbox) => ({
+    key: s.key,
+    name: s.name,
+    pending: s.pending,
+    parked: s.parked,
+    oldestPending: timeOf(s.oldest_pending_at),
+    lastPublished: timeOf(s.last_published_at),
+    failures: s.failures,
+    lastError: s.last_error,
+    current: s.key === status.stream_key,
+  }))
 }
 
 /** Events published per day, oldest first, every type together. */

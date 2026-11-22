@@ -56,6 +56,8 @@ export function describeReason(r: Reason, speech: Speech): string[] {
       return [t('reason.backlog', { n: r.n, since: ago(r.since, speech) })]
     case 'consumer_behind':
       return [t('reason.consumer_behind', { name: r.name, n: r.n })]
+    case 'stream_undeclared':
+      return [t('reason.stream_undeclared', { key: r.key, n: r.n })]
   }
 }
 

@@ -168,6 +168,10 @@
   color: var(--_warn);
   font-weight: 600;
 }
+.med-table tr[data-undeclared='true'] td:nth-child(2) {
+  color: var(--_danger);
+  font-weight: 600;
+}
 
 .med-button {
   font: inherit;

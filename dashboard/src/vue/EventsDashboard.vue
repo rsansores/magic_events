@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // The ready-made dashboard: a banner that says in one line whether events
 // are leaving, then the outbox and the relay, what was set aside, the
-// stream, the consumers and what was published; and, when the host gives a
-// way to fetch them, the most recent events.
+// stream, every stream of the outbox when there are several, the consumers
+// and what was published; and, when the host gives a way to fetch them, the
+// most recent events.
 //
 // It knows no URL: the host passes the functions that fetch the relay's
 // answers from its own handlers. Its look is in
@@ -29,15 +30,26 @@ const props = defineProps<{
   consumerLag?: number
 }>()
 
-const { status, banner, consumers, published, oldestPending, lastPublished, error, stale, speech, t } =
-  useEventsDashboard(() => props.fetchStatus(), {
-    every: () => props.every,
-    locale: () => props.locale,
-    messages: () => props.messages,
-    lagAfter: () => props.lagAfter,
-    stuckAfter: () => props.stuckAfter,
-    consumerLag: () => props.consumerLag,
-  })
+const {
+  status,
+  banner,
+  streams,
+  consumers,
+  published,
+  oldestPending,
+  lastPublished,
+  error,
+  stale,
+  speech,
+  t,
+} = useEventsDashboard(() => props.fetchStatus(), {
+  every: () => props.every,
+  locale: () => props.locale,
+  messages: () => props.messages,
+  lagAfter: () => props.lagAfter,
+  stuckAfter: () => props.stuckAfter,
+  consumerLag: () => props.consumerLag,
+})
 
 const n = (value: number) => count(value, speech.value?.locale ?? 'en')
 const titleId = useId()
@@ -132,6 +144,36 @@ const subjectsHidden = computed(() =>
           </li>
         </ul>
         <p v-if="parkedMore > 0" class="med-line">{{ t('parked.more', { n: parkedMore }) }}</p>
+      </section>
+
+      <section v-if="streams" class="med-card">
+        <h3 class="med-heading">{{ t('streams.title') }}</h3>
+        <table class="med-table">
+          <thead>
+            <tr>
+              <th scope="col">{{ t('streams.stream') }}</th>
+              <th scope="col">{{ t('streams.pending') }}</th>
+              <th scope="col">{{ t('streams.parked') }}</th>
+              <th scope="col">{{ t('streams.failures') }}</th>
+              <th scope="col">{{ t('streams.last_published') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in streams" :key="s.key" :data-undeclared="s.name == null">
+              <th scope="row">
+                {{ s.key || t('streams.main') }}
+                <span class="med-filter"
+                  ><code v-if="s.name">{{ s.name }}</code
+                  ><template v-else>{{ t('streams.undeclared') }}</template></span
+                >
+              </th>
+              <td>{{ n(s.pending) }}</td>
+              <td>{{ n(s.parked) }}</td>
+              <td :title="s.lastError ?? undefined">{{ n(s.failures) }}</td>
+              <td>{{ describeSince(s.lastPublished, speech, t('consumer.never')) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section v-if="consumers" class="med-card">

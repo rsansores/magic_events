@@ -29,7 +29,11 @@ describe('useEventsView', () => {
     const { v, answer, scope } = view(status)
     expect(v.banner.value?.mood).toBe('down')
     expect(v.consumers.value?.map((c) => c.name)).toEqual(['billing', 'shipping'])
+    expect(v.streams.value?.map((s) => s.key)).toEqual(['', 'live'])
+    answer.value = { ...status, streams: status.streams!.slice(0, 1) }
+    expect(v.streams.value, 'one stream, the answered one: nothing to list').toBeNull()
     answer.value = narrowed
+    expect(v.streams.value).toBeNull()
     expect(v.consumers.value).toBeNull()
     expect(v.published.value).toBeNull()
     expect(v.status.value?.filter).toBe(narrowed.filter)
