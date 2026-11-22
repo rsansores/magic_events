@@ -251,21 +251,26 @@ rows, so a stream whose broker fails holds back no other.
 The relay that leads declares its streams as it takes the lock: each one's
 JetStream name, prefix and `max_body`, recorded in the database. The
 streams it publishes are its own settings' — give every process the same.
-`emit` refuses an event of a stream the leading relay does not declare: it
-would wait with nothing to publish it. So a stream added in a deploy takes
-events once a relay of the new settings leads; while one of the old still
-does, its events are refused.
+`emit` takes an event of any stream a process declared as it started, and
+refuses one of a stream none ever did: it would wait with nothing to
+publish it. So a stream added in a deploy takes events as soon as a process
+of the new settings starts; they wait until one of them leads, and the
+status shows them waiting meanwhile.
 
 `Events::start` refuses a key declared twice, two keys of one JetStream
 stream, and subject prefixes one of which takes the other's subjects — and
 settings that declare a stream otherwise than the leading relay does, as
 another JetStream stream or under another prefix: two relays would publish
 its events to two places. A stream's name and prefix change with every
-relay stopped; the first to start declares them anew.
+relay stopped; the first to start declares them anew. A process that
+started while no relay led is held to no other: should it take over with
+another name or prefix for a stream, it says so in a warning, and the
+stream's events go where it says from then on.
 
-A stream no relay declares any more keeps its waiting events — nothing
-publishes them, nothing drops them — and the status lists it. Declare it
-again to publish them, or retire it:
+A stream the leading relay does not declare keeps its waiting events, and
+takes more — nothing publishes them, nothing drops them — and the status
+lists it, stuck. Declare it again to publish them, or retire it once no
+process declares it: `emit` refuses its events from then on.
 
 ```rust
 // The stream `live` is in no relay's settings any more: forget it,

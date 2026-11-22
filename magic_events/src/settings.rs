@@ -506,6 +506,10 @@ impl Settings {
 /// Whether `key` may name a stream: lowercase ASCII letters, digits and
 /// `_`, starting with a letter, 32 bytes at most. The derive's code asks it
 /// of every `stream = …` as it compiles, so a key is held to one rule.
+///
+/// The code the derive generates calls it in a constant, as
+/// `magic_events::__private::is_key`: it stays a `const fn`, at that path,
+/// for as long as the derive and the crate are released together.
 pub const fn is_key(key: &str) -> bool {
     let bytes = key.as_bytes();
     if bytes.is_empty() || bytes.len() > LONGEST_KEY || !bytes[0].is_ascii_lowercase() {

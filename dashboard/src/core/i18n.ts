@@ -42,9 +42,8 @@ const en: MessageTable = {
     other: '{name} is {n} messages behind.',
   },
   'reason.stream_undeclared': {
-    one: 'The stream “{key}” is declared by no relay any more: {n} event waits for it, and nothing publishes it.',
-    other:
-      'The stream “{key}” is declared by no relay any more: {n} events wait for it, and nothing publishes them.',
+    one: 'The leading relay does not publish the stream “{key}”: {n} event waits for it.',
+    other: 'The leading relay does not publish the stream “{key}”: {n} events wait for it.',
   },
   loading: 'Loading…',
   'fetch.failed': 'The status could not be fetched: {error}',

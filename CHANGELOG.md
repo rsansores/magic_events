@@ -23,10 +23,16 @@ contract 2: fields renamed (below); the dashboard reads only contract 2.
 - **The leader declares the streams.** A relay that takes the lock records,
   for each stream its settings declare, the JetStream name, the prefix and
   `max_body`, and marks every other stream undeclared; its lanes publish
-  its own settings' streams. `emit` refuses with `Error::Misuse`, writing
-  nothing, an event of a stream the leading relay does not declare.
+  its own settings' streams, and a warning says when it moves one
+  elsewhere than the relay before it declared. Every process that starts
+  records the streams it declares; `emit` refuses with `Error::Misuse`,
+  writing nothing, an event of a stream none ever did, and takes any other
+  — waiting, when the leader does not publish its stream, as the status
+  shows. A relay that cannot declare its streams lets go of the lock and
+  waits `standby`.
 - **`Events::retire(key, drop_waiting)`** takes away a stream no relay
-  declares any more, refusing its waiting events unless told to drop them.
+  declares any more, refusing its waiting events unless told to drop them;
+  `emit` refuses its events from then on.
 - **Status, recent and unpark per stream.** `Filter::main()` (was
   `Filter::all()`) reads the main stream, `Filter::stream(key)` another,
   `Filter::subject(…)` the stream whose prefix it is under. A status says
@@ -54,8 +60,9 @@ Upgrading from 0.1:
   0.1 writer can be left). A relay of 0.1 still leading after it fails its
   reads — the step renames the outbox's `emitted_at` to `occurred_at` for
   that — and publishes nothing until it stops and a 0.2 relay takes over.
-  A stream added in the deploy takes events once a relay that declares it
-  leads; its events are refused while one of older settings does.
+  A stream added in the deploy takes events from the first process of the
+  new settings that starts; they wait while a relay of older settings
+  leads, and go out once one of the new does.
 - **The grants**: the relay's role needs `INSERT` on `magic_events.relay`
   too, and — to retire a stream — `DELETE` on `magic_events.relay` and
   `magic_events.published`.

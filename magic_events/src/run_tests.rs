@@ -581,9 +581,10 @@ async fn streams_that_collide_are_refused_at_start(pool: PgPool) {
 }
 
 /// A stream declared once and no longer: its rows stay where they are —
-/// nothing publishes them, and nothing drops them — `emit` refuses its
-/// events, the status of every subject lists it, undeclared, with what
-/// waits; and retiring it takes it away, its rows only when told to.
+/// nothing publishes them, and nothing drops them — `emit` still takes its
+/// events, which wait with them, the status of every subject lists it,
+/// undeclared, with what waits; and retiring it takes it away, its rows
+/// only when told to, and `emit` refuses its events from then on.
 #[sqlx::test(migrations = false)]
 async fn a_stream_no_longer_declared_keeps_its_rows_until_retired(pool: PgPool) {
     let broker = Broker::live().await;
@@ -610,10 +611,7 @@ async fn a_stream_no_longer_declared_keeps_its_rows_until_retired(pool: PgPool) 
     assert_eq!(broker.bodies().await.len(), 1);
     assert!(broker.bodies_of("live").await.is_empty());
     let mut conn = pool.acquire().await.unwrap();
-    match crate::emit(&mut conn, &seen("north", 2)).await {
-        Err(Error::Misuse(why)) => assert!(why.contains("does not declare"), "{why}"),
-        other => panic!("{other:?}"),
-    }
+    crate::emit(&mut conn, &seen("north", 2)).await.unwrap();
     let status = events.status(&Filter::main()).await.unwrap();
     let live = &broker.stream("live");
     // Each stream's key, whether declared, as what, and what waits.
@@ -648,7 +646,7 @@ async fn a_stream_no_longer_declared_keeps_its_rows_until_retired(pool: PgPool) 
                 false,
                 Some(live.name.as_str()),
                 Some(live.subject_prefix.as_str()),
-                1
+                2
             )
         ]
     );
@@ -660,14 +658,14 @@ async fn a_stream_no_longer_declared_keeps_its_rows_until_retired(pool: PgPool) 
     for (key, refused) in [
         ("", "never retired"),
         ("gone", "no stream `gone`"),
-        ("live", "1 events wait"),
+        ("live", "2 events wait"),
     ] {
         match events.retire(key, false).await {
             Err(Error::Misuse(why)) => assert!(why.contains(refused), "{key}: {why}"),
             other => panic!("{key}: {other:?}"),
         }
     }
-    assert_eq!(events.retire("live", true).await.unwrap(), 1);
+    assert_eq!(events.retire("live", true).await.unwrap(), 2);
     assert_eq!(
         count(
             &pool,
@@ -683,6 +681,22 @@ async fn a_stream_no_longer_declared_keeps_its_rows_until_retired(pool: PgPool) 
     );
     let status = events.status(&Filter::main()).await.unwrap();
     assert_eq!(status.outboxes.unwrap().len(), 1);
+    match crate::emit(&mut conn, &seen("north", 3)).await {
+        Err(Error::Misuse(why)) => assert!(why.contains("no relay declares"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+
+    // Rows of a stream whose relay row was deleted by hand are still the
+    // stream's.
+    sqlx::query(
+        "INSERT INTO magic_events.outbox (event_id, stream, subject, type, headers, body) \
+         VALUES (gen_random_uuid(), 'gone', 'orders.north.seen', 'order.seen.v1', '{}', \
+                 '\\x7b7d')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events.retire("gone", true).await.unwrap(), 1);
     events.stop().await;
     broker.done().await;
 }
@@ -750,29 +764,35 @@ async fn a_start_that_declares_a_stream_otherwise_than_the_leader_is_refused(poo
         ),
         other => panic!("{other:?}"),
     }
+    let prefix = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT subject_prefix FROM magic_events.relay WHERE stream = 'live'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        prefix().await,
+        broker.stream("live").subject_prefix,
+        "only the leader writes it"
+    );
     leading.stop().await;
     Events::start(pool.clone(), broker.jetstream.clone(), moved)
         .await
         .unwrap()
         .stop()
         .await;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT subject_prefix FROM magic_events.relay WHERE stream = 'live'"
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap(),
-        "moved"
-    );
+    assert_eq!(prefix().await, "moved");
     broker.done().await;
 }
 
-/// A stream added while a relay of older settings leads: `emit` refuses its
-/// events until a relay that publishes it leads — and the status of it
-/// answers meanwhile, nothing published, nothing failed.
+/// A stream added while a relay of older settings leads: `emit` takes its
+/// events from the start of the process that declares it, and they wait —
+/// the status of it says so, nothing published, nothing failed — until a
+/// relay that publishes it leads.
 #[sqlx::test(migrations = false)]
-async fn a_stream_is_taken_once_a_relay_that_declares_it_leads(pool: PgPool) {
+async fn a_stream_added_waits_for_a_relay_that_declares_it(pool: PgPool) {
     let broker = Broker::live().await;
     Events::install(&pool).await.unwrap();
     let older = Events::start(
@@ -793,11 +813,7 @@ async fn a_stream_is_taken_once_a_relay_that_declares_it_leads(pool: PgPool) {
     )
     .await
     .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
-    match crate::emit(&mut conn, &seen("north", 1)).await {
-        Err(Error::Misuse(why)) => assert!(why.contains("does not declare"), "{why}"),
-        other => panic!("{other:?}"),
-    }
+    emit_each(&pool, &[seen("north", 1)]).await;
     let status = newer.status(&Filter::stream("live")).await.unwrap();
     assert_eq!(
         (
@@ -805,24 +821,91 @@ async fn a_stream_is_taken_once_a_relay_that_declares_it_leads(pool: PgPool) {
             status.relay.last_published_at,
             status.outbox.pending
         ),
-        (0, None, 0)
+        (0, None, 1)
     );
+    let outboxes = status.outboxes.unwrap();
+    assert!(!outboxes[1].declared && outboxes[1].name.is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(broker.bodies_of("live").await.is_empty());
 
     older.stop().await;
-    until("the newer relay declares `live`", || async {
-        count(
-            &pool,
-            "SELECT count(*) FROM magic_events.relay WHERE stream = 'live' AND declared",
-        )
-        .await
-            == 1
-    })
-    .await;
-    crate::emit(&mut conn, &seen("north", 1)).await.unwrap();
     until("published to `live`", || async {
         broker.bodies_of("live").await.len() == 1
     })
     .await;
     newer.stop().await;
+    broker.done().await;
+}
+
+/// A relay whose role may not declare its streams — an upgrade's new grant
+/// missing — lets go of the lock and waits `standby` before it asks again,
+/// rather than holding it in a loop: a process that can lead takes over.
+#[sqlx::test(migrations = false)]
+async fn a_relay_that_cannot_declare_its_streams_stands_aside(pool: PgPool) {
+    let broker = Broker::new().await;
+    Events::install(&pool).await.unwrap();
+    crate::stream::ensure(&broker.jetstream, &broker.settings.main)
+        .await
+        .unwrap();
+    let ungranted = role(
+        &pool,
+        &[
+            "USAGE ON SCHEMA magic_events",
+            "SELECT, UPDATE, DELETE ON magic_events.outbox",
+            "SELECT, UPDATE ON magic_events.relay",
+            "SELECT, INSERT, UPDATE ON magic_events.published",
+            "SELECT ON magic_events.version",
+        ],
+    )
+    .await;
+    let relay = std::sync::Arc::new(
+        Events::prepare(
+            pool.clone(),
+            std::sync::Arc::new(broker.jetstream.clone()),
+            broker
+                .settings
+                .clone()
+                .role(&ungranted)
+                .standby(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap(),
+    );
+    let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn({
+        let relay = relay.clone();
+        async move {
+            relay
+                .run(async move {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    // Half a second, looked at every 10 ms: the lock is held for a moment
+    // at the start, and free after.
+    let mut held = 0;
+    for _ in 0..50 {
+        held += count(&pool, HELD).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(held <= 3, "held in {held} of 50 looks: it does not let go");
+
+    let healthy = Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone(),
+    )
+    .await
+    .unwrap();
+    emit_each(&pool, &[shipped("north", 1)]).await;
+    until("the healthy process publishes", || async {
+        broker.bodies().await.len() == 1
+    })
+    .await;
+    shutdown.send(()).unwrap();
+    running.await.unwrap();
+    healthy.stop().await;
+    drop_role(&pool, &ungranted).await;
     broker.done().await;
 }
