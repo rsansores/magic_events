@@ -197,8 +197,12 @@ pub(crate) enum Led {
     /// It was told to stop: the lock back, to let go of, unless it was lost
     /// meanwhile.
     Stopped(Option<Lock>),
-    /// The lock was lost, or the streams could not be declared: stand by.
+    /// The lock was lost: stand by.
     Lost,
+    /// The streams could not be declared — a grant missing, say — and the
+    /// lock was let go: wait `standby` before asking for it again, so a
+    /// process that can lead takes it meanwhile.
+    Undeclared,
 }
 
 /// The relay of one process: its database, its broker and its settings.
@@ -229,6 +233,10 @@ impl Relay {
                     return;
                 }
                 Led::Lost => {}
+                Led::Undeclared => tokio::select! {
+                    () = &mut shutdown => return,
+                    () = tokio::time::sleep(self.settings.standby) => {}
+                },
             }
         }
     }
@@ -255,8 +263,13 @@ impl Relay {
         shutdown: &mut std::pin::Pin<&mut F>,
     ) -> Led {
         if let Err(e) = self.declare(&mut lock).await {
-            tracing::error!("events: the relay's streams could not be declared — standing by: {e}");
-            return Led::Lost;
+            tracing::error!(
+                "events: the relay's streams could not be declared — letting go of the lock, \
+                 and standing by for {:?}: {e}",
+                self.settings.standby
+            );
+            lock.release().await;
+            return Led::Undeclared;
         }
         tracing::info!("events: this process runs the relay");
         let lock = Mutex::new(lock);
@@ -292,14 +305,37 @@ impl Relay {
 
     /// Writes, fenced, what this process declares: a relay row for each of
     /// its streams — its JetStream name, its prefix and its `max_body`,
-    /// which `emit` holds bodies to — and every other stream undeclared, so
-    /// `emit` refuses what nothing publishes.
+    /// which `emit` holds bodies to — and every other stream undeclared, for
+    /// the status. Only this writes a stream's name and prefix; a stream it
+    /// moves elsewhere than the relay before it declared is logged.
     pub(crate) async fn declare(&self, lock: &mut Lock) -> Result<(), Error> {
         bounded(lock.wait, async {
             let mut tx = lock.fenced().await?;
+            let before: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT stream, name, subject_prefix FROM magic_events.relay \
+                  WHERE name IS NOT NULL AND subject_prefix IS NOT NULL",
+            )
+            .fetch_all(&mut *tx)
+            .await?;
             let mut keys = Vec::new();
             for declared in self.settings.declared() {
                 let stream = declared.stream;
+                // A process that started while no relay led was never held to
+                // the one that led before: its events of the stream now go
+                // elsewhere, and the operator is told.
+                if let Some((_, name, prefix)) = before.iter().find(|(key, name, prefix)| {
+                    key == declared.key
+                        && (*name != stream.name || *prefix != stream.subject_prefix)
+                }) {
+                    tracing::warn!(
+                        stream = %declared.key,
+                        "events: this relay declares the stream as `{}` under `{}`, where the \
+                         one before declared it as `{name}` under `{prefix}`: its events go there \
+                         from now on",
+                        stream.name,
+                        stream.subject_prefix
+                    );
+                }
                 sqlx::query(
                     "INSERT INTO magic_events.relay \
                             (stream, name, subject_prefix, max_body, declared) \

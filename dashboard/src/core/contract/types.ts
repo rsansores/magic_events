@@ -154,7 +154,7 @@ export type StreamOutbox = {
 key: string, 
 /**
  * Whether the leading relay declares it: when not, nothing publishes
- * what waits for it, and `emit` refuses its events.
+ * what waits for it.
  */
 declared: boolean, 
 /**

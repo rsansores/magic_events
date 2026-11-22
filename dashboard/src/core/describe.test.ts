@@ -47,7 +47,7 @@ describe('the sentences', () => {
       'billing is 1,200 messages behind.',
     ])
     expect(describeReason({ kind: 'stream_undeclared', key: 'live', n: 1 }, speech)).toEqual([
-      'The stream “live” is declared by no relay any more: 1 event waits for it, and nothing publishes it.',
+      'The leading relay does not publish the stream “live”: 1 event waits for it.',
     ])
   })
 

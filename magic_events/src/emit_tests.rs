@@ -164,36 +164,33 @@ async fn emit_needs_the_schema(pool: PgPool) {
     }
 }
 
-/// An event of a stream the leading relay does not declare — none ever did,
-/// or it did no longer — would wait in the outbox with nothing to publish
-/// it: refused at the call, and nothing written.
+/// An event of a stream no relay ever declared would wait in the outbox
+/// with nothing to publish it: refused at the call, and nothing written.
+/// One a relay declared — leading or not — is taken: it waits for a relay
+/// that publishes it.
 #[sqlx::test(migrations = false)]
-async fn an_event_of_a_stream_the_leading_relay_does_not_declare_is_refused(pool: PgPool) {
+async fn an_event_of_a_stream_no_relay_declared_is_refused(pool: PgPool) {
     Events::install(&pool).await.unwrap();
     let mut conn = pool.acquire().await.unwrap();
     let seen = Screens::Seen {
         store: "north".to_owned(),
         ids: vec![1],
     };
-    for row in [
-        "",
-        "INSERT INTO magic_events.relay (stream, declared) VALUES ('live', false)",
-    ] {
-        if !row.is_empty() {
-            sqlx::query(row).execute(&pool).await.unwrap();
-        }
-        match emit(&mut conn, &seen).await {
-            Err(Error::Misuse(why)) => assert!(
-                why.contains(
-                    "`order.seen.v1` goes to the stream `live`, which the leading relay does \
-                     not declare"
-                ) && why.contains(r#"Settings::stream("live", …)"#),
-                "{why}"
-            ),
-            other => panic!("{other:?}"),
-        }
+    match emit(&mut conn, &seen).await {
+        Err(Error::Misuse(why)) => assert!(
+            why.contains("`order.seen.v1` goes to the stream `live`, which no relay declares")
+                && why.contains(r#"Settings::stream("live", …)"#),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
     }
     assert!(outbox(&pool).await.is_empty());
+    sqlx::query("INSERT INTO magic_events.relay (stream, declared) VALUES ('live', false)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    emit(&mut conn, &seen).await.unwrap();
+    assert_eq!(outbox(&pool).await.len(), 1);
 }
 
 /// Each row says its stream — the main one by the empty key — and each
@@ -201,12 +198,10 @@ async fn an_event_of_a_stream_the_leading_relay_does_not_declare_is_refused(pool
 #[sqlx::test(migrations = false)]
 async fn an_event_is_written_for_its_stream_and_held_to_its_limit(pool: PgPool) {
     Events::install(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO magic_events.relay (stream, max_body, declared) VALUES ('live', 40, true)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO magic_events.relay (stream, max_body) VALUES ('live', 40)")
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut conn = pool.acquire().await.unwrap();
     let seen = |n: usize| Screens::Seen {
         store: "north".to_owned(),

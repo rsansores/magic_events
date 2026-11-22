@@ -70,8 +70,8 @@ this build takes over.
 4. runs one statement: it reads the `max_body` of the event's stream from
    its relay row (64 KiB when no relay recorded one) and inserts the row
    only if the body fits, answering which — and refuses the event, writing
-   nothing, when the leading relay does not declare its stream: nothing
-   would publish it.
+   nothing, when its stream has no relay row: no process ever declared it,
+   or it was retired, and nothing would publish it.
 
 No broker, no second round trip: the writer pays one `INSERT`. It does not
 know the subject prefix or the CloudEvents `source`; the relay adds both,
@@ -92,18 +92,28 @@ hold another's events, and a subject filter would not say whose it is.
 Which streams are published is the leader's to say: as it takes the lock,
 it writes, fenced, a relay row for each stream its settings declare — the
 JetStream name, the prefix, the `max_body` — marks every other stream
-undeclared, and runs a lane for each of its own. `emit` takes an event only
-for a stream the leader declares. A process that starts while another
-leads refuses settings that declare a stream otherwise than the leader
-does — another JetStream stream, another prefix — since two relays would
-publish its events to two places; with no relay leading, the one that
-starts declares its streams as its probe holds the lock.
+undeclared, and runs a lane for each of its own. Only the leader writes
+what a stream is, its name and prefix; should it change them from what the
+relay before it declared, it logs a warning saying from what to what — a
+process that started while no relay led was held to no other, so a fleet
+of mixed settings would move a key's events at each takeover, and the
+warning is how that shows. A process that starts while another leads
+refuses settings that declare a stream otherwise than the leader does —
+another JetStream stream, another prefix — since two relays would publish
+its events to two places; with no relay leading, the one that starts
+declares its streams as its probe holds the lock. Either way, it then
+makes a relay row for each of its streams that has none — leaving any
+other as it is — so `emit` takes the stream's events from then on; they
+wait until a relay that declares it leads. A failed declaration — a grant
+missing, say — lets go of the lock, and the relay asks for it again only
+after `standby`, so a process that can lead takes over meanwhile.
 
-A stream no relay declares any more has no lane: its rows wait, and the
-status lists it as declared by no one; `emit` refuses its events. Nothing
-drops its rows but `Events::retire(key, true)`, which takes the stream
-away, refusing while a relay declares it, and refusing its waiting rows
-unless told to drop them.
+A stream the leader does not declare has no lane: its rows wait, `emit`
+still takes its events, and the status lists it as declared by no one.
+Nothing drops its rows but `Events::retire(key, true)`, which takes the
+stream away — its relay row with it, so `emit` refuses its events —
+refusing while a relay declares it, and refusing its waiting rows unless
+told to drop them.
 
 ## The relay
 
@@ -235,8 +245,10 @@ remembers a position to skip past them; the relay reads what is there.
 | The stream took a message, and the row was not deleted — the relay died, or the acknowledgement was lost — and it is sent again only after `duplicate_window` | Published again, and this time kept: a duplicate, with the same `ce-id`. | Consumers deduplicate by `ce-id`. |
 | A message is parked | The rest of its transaction's events go out before it; it follows them once unparked. | Consumers do not rely on order (a re-read does not need it). |
 | No process runs the relay | Events wait in the outbox; the status says no relay runs. | Starting one. |
-| A stream is no longer declared by the leading relay | Its rows wait, nothing publishes them; `emit` refuses its events; the status of every subject lists it as declared by no one. | Declaring it again, or `Events::retire`. |
-| An event names a stream the leading relay does not declare — none ever did, or a relay of older settings leads | `emit` refuses it, and writes nothing. | A relay that declares the stream leading. |
+| The leading relay does not declare a stream — it was taken out of the settings, or a relay of older settings leads | Its rows wait, nothing publishes them; `emit` still takes its events; the status of every subject lists it as declared by no one, and the dashboard as stuck. | A relay that declares it leading, or `Events::retire`. |
+| An event names a stream no process ever declared, or one retired | `emit` refuses it, and writes nothing. | Declaring the stream, and starting a relay. |
+| The leading relay cannot declare its streams — a grant missing | It lets go of the lock, logs why, and asks again after `standby`; another process takes over meanwhile. | The grant. |
+| A relay takes over declaring a stream otherwise than the one before | A warning, from what to what; the stream's events go where it says. | The same settings everywhere. |
 | A process starts declaring a stream otherwise than the leading relay | `Events::start` refuses it, naming both. | The same settings everywhere; to change a stream's name or prefix, every relay stopped first. |
 | A relay of 0.1 still leads after step 2 | Its reads fail: it publishes nothing, and holds the lock until it stops. | Stopping it: a relay of this build takes over within `standby`. |
 | The relay is stopped as it loses its lock | It stops. | — |

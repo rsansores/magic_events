@@ -76,7 +76,7 @@ A status is of one stream: the main one for `Filter::main()`, another for
 An operator's view of any of them also lists every stream of the outbox —
 what waits for each, and its failed passes — as a table when there are
 several, and is **stuck** while events wait for a stream the leading relay
-does not declare, since no dashboard of that stream will say so. It reads
+does not publish, since no dashboard of that stream will say so. It reads
 answers of contract 2, which 0.2 of the crate serializes.
 
 ### Its look

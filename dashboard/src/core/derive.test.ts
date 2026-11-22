@@ -93,7 +93,7 @@ describe('healthOf', () => {
     })
   })
 
-  it('is stuck while events wait for a stream no relay declares any more, and names it', () => {
+  it('is stuck while events wait for a stream the leading relay does not publish, and names it', () => {
     const undeclared = with_((s) => {
       s.outboxes![1]!.declared = false
       s.outboxes![1]!.parked = 2

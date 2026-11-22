@@ -231,7 +231,7 @@ pub struct StreamOutbox {
     /// The stream's key: empty for the main stream.
     pub key: String,
     /// Whether the leading relay declares it: when not, nothing publishes
-    /// what waits for it, and `emit` refuses its events.
+    /// what waits for it.
     pub declared: bool,
     /// The JetStream stream a relay last declared it as, if one did.
     pub name: Option<String>,
