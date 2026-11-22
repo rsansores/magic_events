@@ -6,7 +6,7 @@ pub magic_events::consume::Delivery::event: E
 pub magic_events::consume::Delivery::id: alloc::string::String
 pub magic_events::consume::Delivery::redelivered: u64
 pub magic_events::consume::Delivery::subject: alloc::string::String
-pub magic_events::consume::Delivery::time: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::consume::Delivery::time: core::option::Option<time::offset_date_time::OffsetDateTime>
 impl<E: core::clone::Clone> core::clone::Clone for magic_events::consume::Delivery<E>
 pub fn magic_events::consume::Delivery<E>::clone(&self) -> Self
 impl<E: core::fmt::Debug> core::fmt::Debug for magic_events::consume::Delivery<E>
@@ -24,7 +24,7 @@ pub mod magic_events::status
 #[non_exhaustive] pub struct magic_events::status::Consumer
 pub magic_events::status::Consumer::ack_pending: u64
 pub magic_events::status::Consumer::filters: alloc::vec::Vec<alloc::string::String>
-pub magic_events::status::Consumer::last_active: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Consumer::last_active: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::Consumer::name: alloc::string::String
 pub magic_events::status::Consumer::pending: u64
 pub magic_events::status::Consumer::redelivered: u64
@@ -63,8 +63,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Filter
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Filter
 #[non_exhaustive] pub struct magic_events::status::JetStream
 pub magic_events::status::JetStream::bytes: core::option::Option<u64>
-pub magic_events::status::JetStream::first_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
-pub magic_events::status::JetStream::last_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::JetStream::first_at: core::option::Option<time::offset_date_time::OffsetDateTime>
+pub magic_events::status::JetStream::last_at: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::JetStream::messages: u64
 pub magic_events::status::JetStream::name: alloc::string::String
 pub magic_events::status::JetStream::subjects: alloc::vec::Vec<magic_events::status::SubjectCount>
@@ -87,7 +87,7 @@ pub magic_events::status::Message::body: alloc::string::String
 pub magic_events::status::Message::headers: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub magic_events::status::Message::sequence: u64
 pub magic_events::status::Message::subject: alloc::string::String
-pub magic_events::status::Message::time: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Message::time: time::offset_date_time::OffsetDateTime
 impl core::clone::Clone for magic_events::status::Message
 pub fn magic_events::status::Message::clone(&self) -> Self
 impl core::fmt::Debug for magic_events::status::Message
@@ -103,7 +103,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Message
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Message
 #[non_exhaustive] pub struct magic_events::status::Outbox
 pub magic_events::status::Outbox::first_parked: alloc::vec::Vec<magic_events::status::Parked>
-pub magic_events::status::Outbox::oldest_pending_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Outbox::oldest_pending_at: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::Outbox::parked: u64
 pub magic_events::status::Outbox::pending: u64
 impl core::clone::Clone for magic_events::status::Outbox
@@ -121,11 +121,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Outbox
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Outbox
 #[non_exhaustive] pub struct magic_events::status::Parked
 pub magic_events::status::Parked::attempts: u32
-pub magic_events::status::Parked::emitted_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Parked::emitted_at: time::offset_date_time::OffsetDateTime
 pub magic_events::status::Parked::event_id: uuid::Uuid
 pub magic_events::status::Parked::id: i64
 pub magic_events::status::Parked::last_error: core::option::Option<alloc::string::String>
-pub magic_events::status::Parked::parked_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Parked::parked_at: time::offset_date_time::OffsetDateTime
 pub magic_events::status::Parked::subject: alloc::string::String
 pub magic_events::status::Parked::ty: alloc::string::String
 impl core::clone::Clone for magic_events::status::Parked
@@ -143,7 +143,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Parked
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Parked
 #[non_exhaustive] pub struct magic_events::status::Published
 pub magic_events::status::Published::count: u64
-pub magic_events::status::Published::day: chrono::naive::date::NaiveDate
+pub magic_events::status::Published::day: time::date::Date
 pub magic_events::status::Published::ty: alloc::string::String
 impl core::clone::Clone for magic_events::status::Published
 pub fn magic_events::status::Published::clone(&self) -> Self
@@ -179,8 +179,8 @@ impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Recent
 #[non_exhaustive] pub struct magic_events::status::Relay
 pub magic_events::status::Relay::failures: u32
 pub magic_events::status::Relay::last_error: core::option::Option<alloc::string::String>
-pub magic_events::status::Relay::last_published_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
-pub magic_events::status::Relay::retry_after: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::Relay::last_published_at: core::option::Option<time::offset_date_time::OffsetDateTime>
+pub magic_events::status::Relay::retry_after: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::Relay::running: bool
 impl core::clone::Clone for magic_events::status::Relay
 pub fn magic_events::status::Relay::clone(&self) -> Self
@@ -196,7 +196,7 @@ impl core::marker::UnsafeUnpin for magic_events::status::Relay
 impl core::panic::unwind_safe::RefUnwindSafe for magic_events::status::Relay
 impl core::panic::unwind_safe::UnwindSafe for magic_events::status::Relay
 #[non_exhaustive] pub struct magic_events::status::Status
-pub magic_events::status::Status::at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub magic_events::status::Status::at: time::offset_date_time::OffsetDateTime
 pub magic_events::status::Status::broker_error: core::option::Option<alloc::string::String>
 pub magic_events::status::Status::consumers: core::option::Option<alloc::vec::Vec<magic_events::status::Consumer>>
 pub magic_events::status::Status::contract: u32
@@ -225,12 +225,12 @@ pub magic_events::status::StreamOutbox::declared: bool
 pub magic_events::status::StreamOutbox::failures: u32
 pub magic_events::status::StreamOutbox::key: alloc::string::String
 pub magic_events::status::StreamOutbox::last_error: core::option::Option<alloc::string::String>
-pub magic_events::status::StreamOutbox::last_published_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::StreamOutbox::last_published_at: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::StreamOutbox::name: core::option::Option<alloc::string::String>
-pub magic_events::status::StreamOutbox::oldest_pending_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::StreamOutbox::oldest_pending_at: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::StreamOutbox::parked: u64
 pub magic_events::status::StreamOutbox::pending: u64
-pub magic_events::status::StreamOutbox::retry_after: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub magic_events::status::StreamOutbox::retry_after: core::option::Option<time::offset_date_time::OffsetDateTime>
 pub magic_events::status::StreamOutbox::subject_prefix: core::option::Option<alloc::string::String>
 impl core::clone::Clone for magic_events::status::StreamOutbox
 pub fn magic_events::status::StreamOutbox::clone(&self) -> Self

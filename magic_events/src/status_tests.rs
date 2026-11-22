@@ -124,7 +124,7 @@ async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
         (published[0].ty.as_str(), published[0].count),
         ("order.shipped.v1", 3)
     );
-    assert_eq!(published[0].day, status.at.date_naive());
+    assert_eq!(published[0].day, status.at.date());
 
     let streams: Vec<(&str, Option<&str>, u64, u64, bool)> = status
         .outboxes
@@ -516,15 +516,11 @@ impl Stable {
     }
 
     fn text(&mut self, s: &str) -> String {
-        if chrono::DateTime::parse_from_rfc3339(s).is_ok() {
-            let moment = DateTime::from_timestamp(1_800_000_000, 123_456_000).unwrap();
-            return serde_json::to_value(moment)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned();
+        use time::format_description::well_known::{Iso8601, Rfc3339};
+        if OffsetDateTime::parse(s, &Rfc3339).is_ok() {
+            return "2027-01-15T08:00:00.123456Z".to_owned();
         }
-        if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+        if Date::parse(s, &Iso8601::DATE).is_ok() {
             return "2027-01-15".to_owned();
         }
         let mut out = s.to_owned();

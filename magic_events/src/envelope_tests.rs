@@ -3,7 +3,6 @@
 //! fields only.
 
 use super::*;
-use chrono::TimeZone;
 use serde::Serialize;
 
 #[derive(Serialize, crate::Event)]
@@ -152,11 +151,7 @@ fn pending<E: crate::Event>(event: &E, n: u128) -> (&'static str, Pending) {
         ty,
         headers: sqlx::types::Json(headers),
         body: super::body(event, described.variant.is_some()).unwrap(),
-        occurred_at: Utc
-            .with_ymd_and_hms(2027, 1, 15, 8, 0, 0)
-            .unwrap()
-            .checked_add_signed(chrono::Duration::microseconds(123_456))
-            .unwrap(),
+        occurred_at: time::macros::datetime!(2027-01-15 08:00:00.123456 UTC),
     };
     (described.stream, row)
 }

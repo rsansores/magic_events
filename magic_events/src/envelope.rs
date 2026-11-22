@@ -10,8 +10,8 @@
 //! [NATS protocol binding]: https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/nats-protocol-binding.md
 
 use crate::Error;
-use chrono::{DateTime, SecondsFormat, Utc};
 use serde::ser::{self, Serialize};
+use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 /// The CloudEvents version every message says it is.
@@ -269,6 +269,22 @@ impl<'a> ser::Serializer for Unwrap<'a> {
     }
 }
 
+/// `at` as `ce-time`: RFC 3339, in UTC, to the microsecond PostgreSQL
+/// keeps — `2027-01-15T08:00:00.123456Z`.
+fn ce_time(at: OffsetDateTime) -> String {
+    let at = at.to_offset(UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        at.microsecond()
+    )
+}
+
 /// One row of the outbox, as the relay publishes it.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub(crate) struct Pending {
@@ -279,7 +295,7 @@ pub(crate) struct Pending {
     pub(crate) ty: String,
     pub(crate) headers: sqlx::types::Json<serde_json::Map<String, serde_json::Value>>,
     pub(crate) body: Vec<u8>,
-    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) occurred_at: OffsetDateTime,
 }
 
 /// The message of a row: its full subject, and its headers, in the order
@@ -312,11 +328,7 @@ impl Pending {
                 "ce-type",
                 rendered("ce-type").unwrap_or_else(|| header_value(&self.ty)),
             ),
-            (
-                "ce-time",
-                self.occurred_at
-                    .to_rfc3339_opts(SecondsFormat::Micros, true),
-            ),
+            ("ce-time", ce_time(self.occurred_at)),
             ("ce-datacontenttype", CONTENT_TYPE.to_owned()),
         ];
         if let Some(subject) = rendered("ce-subject") {

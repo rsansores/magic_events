@@ -45,7 +45,10 @@ async fn a_committed_event_is_one_message_with_every_header(pool: PgPool) {
     assert_eq!(m.spec.as_deref(), Some("1.0"));
     assert_eq!(m.content.as_deref(), Some("application/json"));
     let time = m.time.as_deref().expect("a ce-time");
-    assert!(chrono::DateTime::parse_from_rfc3339(time).is_ok(), "{time}");
+    assert!(
+        time::OffsetDateTime::parse(time, &time::format_description::well_known::Rfc3339).is_ok(),
+        "{time}"
+    );
     assert_eq!(m.body, r#"{"store":"north","n":1}"#);
 
     assert_eq!(
