@@ -152,7 +152,7 @@ fn pending<E: crate::Event>(event: &E, n: u128) -> (&'static str, Pending) {
         ty,
         headers: sqlx::types::Json(headers),
         body: super::body(event, described.variant.is_some()).unwrap(),
-        emitted_at: Utc
+        occurred_at: Utc
             .with_ymd_and_hms(2027, 1, 15, 8, 0, 0)
             .unwrap()
             .checked_add_signed(chrono::Duration::microseconds(123_456))
@@ -183,9 +183,11 @@ pub(crate) fn golden(path: &str, text: &str) {
 #[test]
 fn the_messages_are_the_golden_ones() {
     let source = "//shop.example.com/eu west";
-    let settings = crate::Settings::new("SHOP", source)
-        .subject_prefix("shop")
-        .stream("live", crate::StreamSettings::new("SHOP_LIVE"));
+    let settings = crate::Settings::new(
+        crate::StreamSettings::new("SHOP").subject_prefix("shop"),
+        source,
+    )
+    .stream("live", crate::StreamSettings::new("SHOP_LIVE"));
     assert!(settings.check().is_ok());
     let events: [(&str, (&str, Pending)); 4] = [
         (

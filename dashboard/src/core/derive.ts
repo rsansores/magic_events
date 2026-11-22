@@ -89,10 +89,10 @@ export function healthOf(status: Status, options: HealthOptions): Health {
   }
   for (const c of status.consumers ?? [])
     if (c.pending >= consumerLag) reasons.push({ kind: 'consumer_behind', name: c.name, n: c.pending })
-  // A stream no settings declare any more has nobody to publish what waits
-  // for it: no dashboard of its own will say so.
-  for (const s of status.streams ?? [])
-    if (s.name == null) reasons.push({ kind: 'stream_undeclared', key: s.key, n: s.pending + s.parked })
+  // A stream the leading relay does not declare has nobody to publish what
+  // waits for it: no dashboard of its own will say so.
+  for (const s of status.outboxes ?? [])
+    if (!s.declared) reasons.push({ kind: 'stream_undeclared', key: s.key, n: s.pending + s.parked })
   reasons.sort((a, b) => SEVERITY[moodOf(b)] - SEVERITY[moodOf(a)])
   const mood = reasons.reduce<Mood>(
     (worst, r) => (SEVERITY[moodOf(r)] > SEVERITY[worst] ? moodOf(r) : worst),
@@ -133,8 +133,10 @@ export function consumersOf(status: Status, consumerLag = 1_000): ConsumerRow[] 
 export interface StreamRow {
   /** Its key: empty for the main stream. */
   key: string
-  /** The JetStream stream it is; `null` when no settings declare it any
-   * more. */
+  /** Whether the leading relay declares it: when not, nothing publishes
+   * what waits for it. */
+  declared: boolean
+  /** The JetStream stream a relay last declared it as, if one did. */
   name: string | null
   pending: number
   parked: number
@@ -144,6 +146,8 @@ export interface StreamRow {
   lastPublished: number | null
   failures: number
   lastError: string | null
+  /** When the relay tries it again, in ms; `null` when it is not failing. */
+  retryAt: number | null
   /** Whether it is the stream the answer is of. */
   current: boolean
 }
@@ -151,8 +155,9 @@ export interface StreamRow {
 /** Every stream of the outbox, the main one first; none for a narrowed
  * answer. */
 export function streamsOf(status: Status): StreamRow[] {
-  return (status.streams ?? []).map((s: StreamOutbox) => ({
+  return (status.outboxes ?? []).map((s: StreamOutbox) => ({
     key: s.key,
+    declared: s.declared,
     name: s.name,
     pending: s.pending,
     parked: s.parked,
@@ -160,7 +165,8 @@ export function streamsOf(status: Status): StreamRow[] {
     lastPublished: timeOf(s.last_published_at),
     failures: s.failures,
     lastError: s.last_error,
-    current: s.key === status.stream_key,
+    retryAt: timeOf(s.retry_after),
+    current: s.key === status.key,
   }))
 }
 

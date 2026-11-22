@@ -44,9 +44,9 @@ describe('useEventsDashboard', () => {
   })
 
   it('refuses an answer of another contract', async () => {
-    const { dash, scope } = dashboard(async () => ({ ...status, contract: 2 }))
+    const { dash, scope } = dashboard(async () => ({ ...status, contract: 1 }))
     await dash.refresh()
-    expect(dash.error.value).toMatch(/version 1, and the server answered version 2/)
+    expect(dash.error.value).toMatch(/version 2, and the server answered version 1/)
     expect(dash.banner.value).toBeNull()
     scope.stop()
   })

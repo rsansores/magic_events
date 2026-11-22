@@ -74,8 +74,8 @@ const parkedMore = computed(() =>
 /** The subjects a card lists, and how many more there are. */
 const SUBJECTS_SHOWN = 5
 const subjectsHidden = computed(() =>
-  status.value?.stream
-    ? status.value.stream.subjects_total - Math.min(SUBJECTS_SHOWN, status.value.stream.subjects.length)
+  status.value?.jetstream
+    ? status.value.jetstream.subjects_total - Math.min(SUBJECTS_SHOWN, status.value.jetstream.subjects.length)
     : 0,
 )
 </script>
@@ -121,11 +121,11 @@ const subjectsHidden = computed(() =>
           </p>
           <p class="med-line">{{ describeLastPublished(lastPublished, speech) }}</p>
         </section>
-        <section v-if="status.stream" class="med-card">
-          <h3 class="med-heading">{{ t('stream.title') }} · {{ status.stream.name }}</h3>
-          <p class="med-line">{{ t('stream.messages', { n: status.stream.messages }) }}</p>
+        <section v-if="status.jetstream" class="med-card">
+          <h3 class="med-heading">{{ t('stream.title') }} · {{ status.jetstream.name }}</h3>
+          <p class="med-line">{{ t('stream.messages', { n: status.jetstream.messages }) }}</p>
           <ul class="med-list">
-            <li v-for="s in status.stream.subjects.slice(0, SUBJECTS_SHOWN)" :key="s.subject">
+            <li v-for="s in status.jetstream.subjects.slice(0, SUBJECTS_SHOWN)" :key="s.subject">
               <code>{{ s.subject }}</code> <span class="med-count">{{ n(s.messages) }}</span>
             </li>
           </ul>
@@ -159,12 +159,12 @@ const subjectsHidden = computed(() =>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in streams" :key="s.key" :data-undeclared="s.name == null">
+            <tr v-for="s in streams" :key="s.key" :data-undeclared="!s.declared">
               <th scope="row">
                 {{ s.key || t('streams.main') }}
                 <span class="med-filter"
                   ><code v-if="s.name">{{ s.name }}</code
-                  ><template v-else>{{ t('streams.undeclared') }}</template></span
+                  ><template v-if="!s.declared"> · {{ t('streams.undeclared') }}</template></span
                 >
               </th>
               <td>{{ n(s.pending) }}</td>

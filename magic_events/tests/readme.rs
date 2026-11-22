@@ -123,14 +123,18 @@ fn migrations() {
 }
 
 fn settings() -> magic_events::Settings {
-    use magic_events::{Settings, Storage};
+    use magic_events::{Settings, Storage, StreamSettings};
     use std::time::Duration;
 
-    Settings::new("SHOP_EVENTS", "//shop.example.com")
-        .subject_prefix("shop.events") // the lowercase stream name by default
-        .retention(Duration::from_secs(30 * 24 * 60 * 60)) // 7 days by default
-        .replicas(3) // 1 by default
-        .storage(Storage::File) // the default
+    Settings::new(
+        StreamSettings::new("SHOP_EVENTS")
+            .subject_prefix("shop.events") // the lowercase stream name by default
+            .retention(Duration::from_secs(30 * 24 * 60 * 60)) // 7 days by default
+            .replicas(3) // 1 by default
+            .storage(Storage::File), // the default
+        "//shop.example.com",
+    )
+    .standby(Duration::from_secs(10)) // 30 s by default
 }
 
 #[cfg(feature = "consume")]
@@ -160,13 +164,20 @@ async fn status(events: magic_events::Events) -> Result<String, Error> {
 
     // Behind your own authorization: the operator's view, or the subjects
     // this caller may see.
-    let status = events.status(&Filter::all()).await?;
+    let status = events.status(&Filter::main()).await?;
     let one_store = events
         .status(&Filter::subject("shop_events.orders.7.>"))
         .await?;
     let live = events.status(&Filter::stream("live")).await?;
-    let last_ten = events.recent(&Filter::all(), 10).await?;
+    let last_ten = events.recent(&Filter::main(), 10).await?;
     Ok(serde_json::to_string(&(status, one_store, live, last_ten))?)
+}
+
+async fn retire(events: magic_events::Events) -> Result<u64, Error> {
+    // The stream `live` is in no relay's settings any more: forget it,
+    // and drop what still waits for it.
+    let dropped = events.retire("live", true).await?;
+    Ok(dropped)
 }
 
 async fn unpark(events: magic_events::Events, id: i64) -> Result<(), Error> {
@@ -174,7 +185,7 @@ async fn unpark(events: magic_events::Events, id: i64) -> Result<(), Error> {
 
     // After fixing what the broker refused: send it again with the next pass.
     events.unpark(id).await?;
-    events.unpark_all(&Filter::all()).await?;
+    events.unpark_all(&Filter::main()).await?;
     Ok(())
 }
 
@@ -232,7 +243,7 @@ fn code(text: &str) -> Vec<String> {
 #[test]
 fn the_readmes_code_compiles() {
     let _ = (
-        hero, streams, install, migrations, settings, status, unpark, no_write,
+        hero, streams, retire, install, migrations, settings, status, unpark, no_write,
     );
     #[cfg(feature = "consume")]
     let _ = billing;

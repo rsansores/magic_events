@@ -50,9 +50,12 @@ impl std::fmt::Debug for Events {
 impl Events {
     /// Starts the relay: checks the settings and the database's schema,
     /// creates or checks every stream they declare
-    /// ([`Settings::manage_stream`]), records each stream's `max_body` for
-    /// [`emit`](crate::emit) — every process that starts records its own, so
-    /// they should agree — and spawns the relay on the current Tokio runtime.
+    /// ([`StreamSettings::manage_stream`](crate::StreamSettings::manage_stream)),
+    /// declares the streams when no other relay leads — [`emit`](crate::emit)
+    /// takes their events from then on — or checks they agree with the
+    /// leading relay's, and spawns the relay on the current Tokio runtime.
+    /// The relay that leads publishes the streams its own settings declare:
+    /// give every process the same.
     ///
     /// The relay holds a connection of its own while it leads, for its lock:
     /// opened with `pool`'s options, not taken from it — one more than the
@@ -64,8 +67,10 @@ impl Events {
     /// # Errors
     ///
     /// [`Error::Misuse`] for settings the relay cannot run with — among them
-    /// a stream key declared twice, two keys of one stream, or subject
-    /// prefixes that overlap — a schema not at this build's version
+    /// a stream key declared twice, two keys of one stream, subject
+    /// prefixes that overlap, or a stream the leading relay declares as
+    /// another JetStream stream or under another prefix — a schema not at
+    /// this build's version
     /// ([`Events::install`]), a stream that does not take the relay's
     /// subjects or that the broker refuses as the settings say it, or a
     /// `max_body` the broker's `max_payload` cannot carry with 4 KiB of
@@ -76,7 +81,18 @@ impl Events {
         jetstream: async_nats::jetstream::Context,
         settings: Settings,
     ) -> Result<Self, Error> {
-        let relay = Self::prepare(pool, Arc::new(jetstream.clone()), settings).await?;
+        Self::start_with(pool, jetstream.clone(), Arc::new(jetstream), settings).await
+    }
+
+    /// `start`, publishing through `publish`: JetStream, or in tests one that
+    /// fails on purpose.
+    pub(crate) async fn start_with(
+        pool: PgPool,
+        jetstream: async_nats::jetstream::Context,
+        publish: Arc<dyn Publish>,
+        settings: Settings,
+    ) -> Result<Self, Error> {
+        let relay = Self::prepare(pool, publish, settings).await?;
         let max_payload = jetstream.client().server_info().max_payload;
         for declared in relay.settings.declared() {
             let max_body = declared.stream.max_body;
@@ -94,7 +110,6 @@ impl Events {
             stream::ensure(&jetstream, declared.stream).await?;
         }
         Self::probe(&relay).await?;
-        Self::record(&relay).await?;
         Ok(Self::spawn(relay, jetstream))
     }
 
@@ -119,39 +134,52 @@ impl Events {
     /// Refuses a database the relay's lock cannot be held on — a pooler in
     /// transaction mode, which may hand each transaction to another server
     /// process — by taking the lock, when no other process holds it, and
-    /// asking in a transaction whether it is held there. The lock is let go
-    /// either way: the relay takes it again as it starts.
+    /// declaring the streams in a fenced transaction, so `emit` takes their
+    /// events from now on. When another process holds it, refuses settings
+    /// that say a stream it declares is another JetStream stream, or under
+    /// another prefix: two relays would publish one key's events to two
+    /// places. Either way the lock is let go: the relay takes it again as it
+    /// starts.
     async fn probe(relay: &Relay) -> Result<(), Error> {
-        let wait = relay.settings.database_timeout;
         let Some(mut lock) = Lock::take(&relay.pool, &relay.settings).await? else {
-            return Ok(());
+            return Self::agrees(relay).await;
         };
-        let fenced = crate::relay::bounded(wait, async {
-            lock.fenced().await?.commit().await?;
-            Ok(())
-        })
-        .await;
+        let declared = relay.declare(&mut lock).await;
         lock.release().await;
-        fenced
+        declared
     }
 
-    /// Records each declared stream's `max_body`, which `emit` holds bodies
-    /// of that stream to — the stream's relay row, made for a stream
-    /// declared the first time: the last process to start says it for all
-    /// of them.
-    pub(crate) async fn record(relay: &Relay) -> Result<(), Error> {
+    /// Refuses settings that declare a stream otherwise than the leading
+    /// relay does.
+    async fn agrees(relay: &Relay) -> Result<(), Error> {
         let mut tx = crate::relay::begin(&relay.pool, &relay.settings).await?;
-        for declared in relay.settings.declared() {
-            sqlx::query(
-                "INSERT INTO magic_events.relay (stream, max_body) VALUES ($1, $2) \
-                 ON CONFLICT (stream) DO UPDATE SET max_body = excluded.max_body",
-            )
-            .bind(declared.key)
-            .bind(i32::try_from(declared.stream.max_body).unwrap_or(i32::MAX))
-            .execute(&mut *tx)
-            .await?;
-        }
+        let leading: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT stream, name, subject_prefix FROM magic_events.relay \
+              WHERE declared AND name IS NOT NULL AND subject_prefix IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
         tx.commit().await?;
+        for (key, name, prefix) in leading {
+            let Some(ours) = relay.settings.find(&key) else {
+                continue;
+            };
+            if ours.stream.name != name || ours.stream.subject_prefix != prefix {
+                return Err(Error::Misuse(format!(
+                    "the leading relay declares {} as `{name}` under `{prefix}`, and these \
+                     settings as `{}` under `{}`: two relays would publish its events to two \
+                     places. A stream's name and prefix change with every relay stopped — \
+                     the first to start declares them anew",
+                    if key.is_empty() {
+                        "the main stream".to_owned()
+                    } else {
+                        format!("the stream `{key}`")
+                    },
+                    ours.stream.name,
+                    ours.stream.subject_prefix
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -235,7 +263,8 @@ impl Events {
     /// `magic_events.relay`; the relay's role needs `SELECT`, `UPDATE` and
     /// `DELETE` on the outbox, `SELECT`, `INSERT` and `UPDATE` on
     /// `magic_events.relay` and on `magic_events.published`, and `SELECT` on
-    /// `magic_events.version`.
+    /// `magic_events.version` — and, to [retire](Events::retire) a stream,
+    /// `DELETE` on `magic_events.relay` and `magic_events.published`.
     ///
     /// # Errors
     ///
@@ -251,7 +280,8 @@ impl Events {
     }
 
     /// One pass of every declared stream now, one after the other, as the
-    /// relay, for a host's tests or a tool: how many rows they published or
+    /// relay — its streams declared first, as a relay that takes the lock
+    /// declares them — for a host's tests or a tool: how many rows they published or
     /// set aside, together, or `None` when a relay — this process's own, or
     /// another's — holds the lock. A stream whose pass fails stops no other
     /// stream's.
@@ -265,6 +295,11 @@ impl Events {
         let Some(lock) = Lock::take(&self.relay.pool, &self.relay.settings).await? else {
             return Ok(None);
         };
+        let mut lock = lock;
+        if let Err(e) = self.relay.declare(&mut lock).await {
+            lock.release().await;
+            return Err(e);
+        }
         let lock = tokio::sync::Mutex::new(lock);
         let mut done = Ok(0);
         for declared in self.relay.settings.declared() {
@@ -279,6 +314,81 @@ impl Events {
         }
         lock.into_inner().release().await;
         done.map(Some)
+    }
+
+    /// Retires the stream `key`, which no relay declares any more: its relay
+    /// row and its counts deleted, so the status lists it no longer. Its
+    /// events still waiting — which nothing publishes — are refused, unless
+    /// `drop_waiting`: then they are deleted with it, never published.
+    /// Answers how many were.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Misuse`] for the main stream, a stream these settings or the
+    /// leading relay's declare — take it out of every relay's settings
+    /// first — a key no stream has, or events waiting without
+    /// `drop_waiting`; [`Error::Database`] when the database fails.
+    pub async fn retire(&self, key: &str, drop_waiting: bool) -> Result<u64, Error> {
+        if key.is_empty() {
+            return Err(Error::Misuse(
+                "the main stream is never retired: every relay declares it".to_owned(),
+            ));
+        }
+        if self.relay.settings.find(key).is_some() {
+            return Err(Error::Misuse(format!(
+                "these settings declare the stream `{key}`: take it out of every relay's \
+                 settings before retiring it"
+            )));
+        }
+        let mut tx = crate::relay::begin(&self.relay.pool, &self.relay.settings).await?;
+        // The row locked: a relay that takes the lock and declares the stream
+        // meanwhile waits, and declares it anew after.
+        let declared: Option<bool> = sqlx::query_scalar(
+            "SELECT declared FROM magic_events.relay WHERE stream = $1 FOR UPDATE",
+        )
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match declared {
+            None => {
+                return Err(Error::Misuse(format!(
+                    "there is no stream `{key}` to retire"
+                )))
+            }
+            Some(true) => {
+                return Err(Error::Misuse(format!(
+                    "the leading relay declares the stream `{key}`: take it out of every \
+                     relay's settings before retiring it"
+                )))
+            }
+            Some(false) => {}
+        }
+        let waiting: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM magic_events.outbox WHERE stream = $1")
+                .bind(key)
+                .fetch_one(&mut *tx)
+                .await?;
+        if waiting > 0 && !drop_waiting {
+            return Err(Error::Misuse(format!(
+                "{waiting} events wait for the stream `{key}`: declare it again to publish \
+                 them, or retire it dropping them"
+            )));
+        }
+        let dropped = sqlx::query("DELETE FROM magic_events.outbox WHERE stream = $1")
+            .bind(key)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        for table in ["published", "relay"] {
+            sqlx::query(&format!(
+                "DELETE FROM magic_events.{table} WHERE stream = $1"
+            ))
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(dropped)
     }
 
     /// Sends the parked row `id` again with the next pass, its attempts

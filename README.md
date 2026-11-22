@@ -195,7 +195,7 @@ pub enum Catalog {
   One write of many rows is one event with many ids.
 - **The body** is the event's JSON, as serde writes it — for an enum, the
   variant's own fields, since the variant is in `ce-type`. 64 KiB at most by
-  default (`Settings::max_body`).
+  default (`StreamSettings::max_body`).
 - **A new version** is a new variant, on the same subject or another, and
   goes out while consumers may still run the build before it. A consumer
   that meets a type it does not declare yet must not drop it: `consume`
@@ -248,12 +248,30 @@ that says no `stream` goes to the main one. One relay publishes them all, in
 one process at a time; each stream has its own passes, backoff and parked
 rows, so a stream whose broker fails holds back no other.
 
-`emit` refuses an event of a stream no relay ever declared — it would wait
-with nothing to publish it. `Events::start` refuses a key declared twice, two
-keys of one JetStream stream, and subject prefixes one of which takes the
-other's subjects. A stream declared once and no longer keeps its waiting
-events — nothing publishes them, nothing drops them — and the status says
-so: declare it again, or delete its rows.
+The relay that leads declares its streams as it takes the lock: each one's
+JetStream name, prefix and `max_body`, recorded in the database. The
+streams it publishes are its own settings' — give every process the same.
+`emit` refuses an event of a stream the leading relay does not declare: it
+would wait with nothing to publish it. So a stream added in a deploy takes
+events once a relay of the new settings leads; while one of the old still
+does, its events are refused.
+
+`Events::start` refuses a key declared twice, two keys of one JetStream
+stream, and subject prefixes one of which takes the other's subjects — and
+settings that declare a stream otherwise than the leading relay does, as
+another JetStream stream or under another prefix: two relays would publish
+its events to two places. A stream's name and prefix change with every
+relay stopped; the first to start declares them anew.
+
+A stream no relay declares any more keeps its waiting events — nothing
+publishes them, nothing drops them — and the status lists it. Declare it
+again to publish them, or retire it:
+
+```rust
+// The stream `live` is in no relay's settings any more: forget it,
+// and drop what still waits for it.
+let dropped = events.retire("live", true).await?;
+```
 
 ## Setting up
 
@@ -281,11 +299,12 @@ on `magic_events.outbox`, `USAGE` on `magic_events.outbox_id_seq` and
 `SELECT` on `magic_events.relay`; the relay's role needs `SELECT`, `UPDATE`
 and `DELETE` on the outbox, `SELECT`, `INSERT` and `UPDATE` on
 `magic_events.relay` and on `magic_events.published`, and `SELECT` on
-`magic_events.version`.
+`magic_events.version` — and, to retire a stream, `DELETE` on
+`magic_events.relay` and `magic_events.published`.
 
 The relay's role is the one your pool logs in as, unless
 `Settings::role` names another: then the relay's session and the crate's
-own transactions — start, status, unpark — run as that role
+own transactions — start, status, unpark, retire — run as that role
 (`SET ROLE`), which the login role must be allowed to set. A host whose
 transactions each take a role of their own, under row security say, gives
 the relay's grants to a role of the relay's, and no other role reads the
@@ -293,15 +312,20 @@ outbox. `emit` runs as your transaction does; `Events::install` as the login
 role, which owns what it creates.
 
 Every setting has a default and a setter. Those of a stream —
-`subject_prefix` to `max_body` below — are the main stream's on `Settings`,
-and another's on its `StreamSettings`; the rest are the relay's:
+`subject_prefix` to `max_body` below — are on its `StreamSettings`, the
+main stream's given to `Settings::new` (or only its name); the rest are the
+relay's, on `Settings`:
 
 ```rust
-Settings::new("SHOP_EVENTS", "//shop.example.com")
-    .subject_prefix("shop.events") // the lowercase stream name by default
-    .retention(Duration::from_secs(30 * 24 * 60 * 60)) // 7 days by default
-    .replicas(3) // 1 by default
-    .storage(Storage::File) // the default
+Settings::new(
+    StreamSettings::new("SHOP_EVENTS")
+        .subject_prefix("shop.events") // the lowercase stream name by default
+        .retention(Duration::from_secs(30 * 24 * 60 * 60)) // 7 days by default
+        .replicas(3) // 1 by default
+        .storage(Storage::File), // the default
+    "//shop.example.com",
+)
+.standby(Duration::from_secs(10)) // 30 s by default
 ```
 
 | Setting | Default | |
@@ -328,9 +352,8 @@ a partition, a frozen machine — PostgreSQL ends its session, and lets the
 lock go, within about 30 seconds; a leader whose database stops answering
 gives up within 30 seconds too, and stands by.
 
-Every process records each stream's `max_body` as it starts, and `emit`
-holds bodies to the last one recorded: give every process the same
-settings.
+The relay that leads records each stream's `max_body` as it takes the
+lock, and `emit` holds bodies to it: give every process the same settings.
 
 ## The messages
 
@@ -428,17 +451,17 @@ per day and type — and what waits for every other stream.
 ```rust
 // Behind your own authorization: the operator's view, or the subjects
 // this caller may see.
-let status = events.status(&Filter::all()).await?;
+let status = events.status(&Filter::main()).await?;
 let one_store = events
     .status(&Filter::subject("shop_events.orders.7.>"))
     .await?;
 let live = events.status(&Filter::stream("live")).await?;
-let last_ten = events.recent(&Filter::all(), 10).await?;
+let last_ten = events.recent(&Filter::main(), 10).await?;
 ```
 
 ![The shop example's events page, with events flowing](https://raw.githubusercontent.com/rsansores/magic_events/main/dashboard/images/flowing.png)
 
-Every read is of one stream — `Filter::all()` the main one's every subject,
+Every read is of one stream — `Filter::main()` the main one's every subject,
 `Filter::stream(key)` another's, `Filter::subject` the stream whose prefix
 it is under — and takes a subject filter, so a view can be narrowed to what
 one caller may see. A consumer's lag is the whole stream's, the published
@@ -456,7 +479,7 @@ down, and why.
 ```rust
 // After fixing what the broker refused: send it again with the next pass.
 events.unpark(id).await?;
-events.unpark_all(&Filter::all()).await?;
+events.unpark_all(&Filter::main()).await?;
 ```
 
 ## Recipes

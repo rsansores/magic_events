@@ -2,10 +2,11 @@
 //! committed, in id order within each stream, and deletes what the stream
 //! acknowledged.
 //!
-//! Each stream the settings declare has a lane of its own — its passes, its
-//! backoff, its failures — and the lanes run side by side on the one lock,
-//! taking turns on its connection for their statements: a stream whose
-//! broker fails or is slow waits alone.
+//! Each stream the leader's settings declare has a lane of its own — its
+//! passes, its backoff, its failures — and the lanes run side by side: a
+//! stream whose broker fails or is slow waits alone. A lane reads through
+//! the pool; only what must be fenced — the settling of a pass — takes a
+//! turn on the lock's connection.
 //!
 //! A pass reads a batch of one stream's pending rows, publishes them outside
 //! any transaction — up to `in_flight` sent and not acknowledged yet, the
@@ -191,6 +192,15 @@ pub(crate) struct Published {
     pub(crate) failure: Option<Failure>,
 }
 
+/// How a relay's leadership ended.
+pub(crate) enum Led {
+    /// It was told to stop: the lock back, to let go of, unless it was lost
+    /// meanwhile.
+    Stopped(Option<Lock>),
+    /// The lock was lost, or the streams could not be declared: stand by.
+    Lost,
+}
+
 /// The relay of one process: its database, its broker and its settings.
 pub(crate) struct Relay {
     pub(crate) pool: PgPool,
@@ -210,9 +220,15 @@ impl Relay {
                 () = &mut shutdown => return,
                 lock = self.lock() => lock,
             };
-            if let Some(lock) = self.lead(lock, &mut shutdown).await {
-                lock.release().await;
-                return;
+            // Once `shutdown` resolved it is not asked again: `lead` says so.
+            match self.lead(lock, &mut shutdown).await {
+                Led::Stopped(lock) => {
+                    if let Some(lock) = lock {
+                        lock.release().await;
+                    }
+                    return;
+                }
+                Led::Lost => {}
             }
         }
     }
@@ -229,67 +245,97 @@ impl Relay {
         }
     }
 
-    /// The relay, for as long as this process holds `lock`: `None` once it
-    /// lost it, or the lock back when `shutdown` resolved — every lane
-    /// between passes, never inside one.
+    /// The relay, for as long as this process holds `lock`, until
+    /// `shutdown` resolves — every lane stopping between passes, never
+    /// inside one — or the lock is lost. It first declares its streams: the
+    /// lanes follow this process's settings, whatever another's said.
     async fn lead<F: Future<Output = ()>>(
         &self,
-        lock: Lock,
+        mut lock: Lock,
         shutdown: &mut std::pin::Pin<&mut F>,
-    ) -> Option<Lock> {
+    ) -> Led {
+        if let Err(e) = self.declare(&mut lock).await {
+            tracing::error!("events: the relay's streams could not be declared — standing by: {e}");
+            return Led::Lost;
+        }
         tracing::info!("events: this process runs the relay");
         let lock = Mutex::new(lock);
         // Set once the relay stops leading — stopped, or its lock lost — so
         // every lane ends after the pass it is in.
         let (stop, _) = watch::channel(false);
-        let lost = {
-            let lanes = futures_util::future::join(
+        let (stopped, lost) = {
+            let led = futures_util::future::join3(
                 futures_util::future::join_all(
                     self.settings
                         .declared()
                         .map(|declared| self.lane(&lock, declared, &stop)),
                 ),
+                self.holding(&lock, &stop),
                 self.pruning(&lock, &stop),
             );
-            tokio::pin!(lanes);
+            tokio::pin!(led);
             tokio::select! {
                 biased;
                 () = &mut *shutdown => {
                     stop.send_replace(true);
-                    (&mut lanes).await.0
+                    (true, (&mut led).await.1)
                 }
-                (lost, ()) = &mut lanes => lost,
+                (_, lost, ()) = &mut led => (false, lost),
             }
         };
-        if lost.contains(&true) {
-            return None;
+        match (stopped, lost) {
+            (true, false) => Led::Stopped(Some(lock.into_inner())),
+            (true, true) => Led::Stopped(None),
+            (false, _) => Led::Lost,
         }
-        Some(lock.into_inner())
     }
 
-    /// One stream's passes, until `stop` is set: answers whether it ended
-    /// for the lock lost, which it then sets `stop` for.
-    async fn lane(
-        &self,
-        lock: &Mutex<Lock>,
-        declared: Declared<'_>,
-        stop: &watch::Sender<bool>,
-    ) -> bool {
+    /// Writes, fenced, what this process declares: a relay row for each of
+    /// its streams — its JetStream name, its prefix and its `max_body`,
+    /// which `emit` holds bodies to — and every other stream undeclared, so
+    /// `emit` refuses what nothing publishes.
+    pub(crate) async fn declare(&self, lock: &mut Lock) -> Result<(), Error> {
+        bounded(lock.wait, async {
+            let mut tx = lock.fenced().await?;
+            let mut keys = Vec::new();
+            for declared in self.settings.declared() {
+                let stream = declared.stream;
+                sqlx::query(
+                    "INSERT INTO magic_events.relay \
+                            (stream, name, subject_prefix, max_body, declared) \
+                     VALUES ($1, $2, $3, $4, true) \
+                     ON CONFLICT (stream) DO UPDATE SET name = excluded.name, \
+                            subject_prefix = excluded.subject_prefix, \
+                            max_body = excluded.max_body, declared = true",
+                )
+                .bind(declared.key)
+                .bind(&stream.name)
+                .bind(&stream.subject_prefix)
+                .bind(i32::try_from(stream.max_body).unwrap_or(i32::MAX))
+                .execute(&mut *tx)
+                .await?;
+                keys.push(declared.key.to_owned());
+            }
+            sqlx::query(
+                "UPDATE magic_events.relay SET declared = false \
+                  WHERE declared AND stream <> ALL($1)",
+            )
+            .bind(&keys)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// One stream's passes, until `stop` is set.
+    async fn lane(&self, lock: &Mutex<Lock>, declared: Declared<'_>, stop: &watch::Sender<bool>) {
         let mut stopping = stop.subscribe();
         let name = &declared.stream.name;
         let (first, max) = self.settings.backoff;
         let mut backoff = first;
-        loop {
-            if *stopping.borrow() {
-                return false;
-            }
-            if !lock.lock().await.still_held().await {
-                // The first lane to find it gone says so.
-                if !stop.send_replace(true) {
-                    tracing::error!("events: the relay's lock is gone, or its database does not answer — standing by");
-                }
-                return true;
-            }
+        while !*stopping.borrow() {
             let wait = match self.pass(lock, declared, backoff).await {
                 Ok(0) => {
                     backoff = first;
@@ -311,8 +357,29 @@ impl Relay {
                 }
             };
             tokio::select! {
-                _ = stopping.wait_for(|stop| *stop) => return false,
+                _ = stopping.wait_for(|stop| *stop) => {}
                 () = tokio::time::sleep(wait) => {}
+            }
+        }
+    }
+
+    /// Asks every `idle` whether the lock is still held, until `stop` is
+    /// set: answers whether it was lost, and then sets `stop`, so every lane
+    /// ends.
+    async fn holding(&self, lock: &Mutex<Lock>, stop: &watch::Sender<bool>) -> bool {
+        let mut stopping = stop.subscribe();
+        loop {
+            if *stopping.borrow() {
+                return false;
+            }
+            if !lock.lock().await.still_held().await {
+                stop.send_replace(true);
+                tracing::error!("events: the relay's lock is gone, or its database does not answer — standing by");
+                return true;
+            }
+            tokio::select! {
+                _ = stopping.wait_for(|stop| *stop) => return false,
+                () = tokio::time::sleep(self.settings.idle) => {}
             }
         }
     }
@@ -349,16 +416,16 @@ impl Relay {
 
     /// One pass of the stream `declared`, as the relay holding `lock` —
     /// shared with the other streams' lanes, which take turns on its
-    /// connection while this one publishes: answers how many rows it
-    /// published or parked. `backoff` is how long the relay waits if the
-    /// broker fails it, which the status shows.
+    /// connection to settle: answers how many rows it published or parked.
+    /// `backoff` is how long the relay waits if the broker fails it, which
+    /// the status shows.
     pub(crate) async fn pass(
         &self,
         lock: &Mutex<Lock>,
         declared: Declared<'_>,
         backoff: Duration,
     ) -> Result<usize, Error> {
-        let mut rows = self.pending(&mut *lock.lock().await, declared).await?;
+        let mut rows = self.pending(declared).await?;
         if rows.is_empty() {
             return Ok(0);
         }
@@ -367,16 +434,15 @@ impl Relay {
             .await
     }
 
-    /// The next batch of the stream's rows to publish, in order.
-    pub(crate) async fn pending(
-        &self,
-        lock: &mut Lock,
-        declared: Declared<'_>,
-    ) -> Result<Vec<Pending>, Error> {
-        bounded(lock.wait, async {
-            let mut tx = lock.fenced().await?;
+    /// The next batch of the stream's rows to publish, in order, read
+    /// through the pool: a read needs no fence — what a relay that lost its
+    /// lock publishes, it cannot settle, and the stream drops when the next
+    /// relay sends it again.
+    pub(crate) async fn pending(&self, declared: Declared<'_>) -> Result<Vec<Pending>, Error> {
+        bounded(self.settings.database_timeout, async {
+            let mut tx = begin(&self.pool, &self.settings).await?;
             let rows = sqlx::query_as::<_, Pending>(
-                "SELECT id, event_id, subject, type, headers, body, emitted_at \
+                "SELECT id, event_id, subject, type, headers, body, occurred_at \
                    FROM magic_events.outbox WHERE stream = $1 AND parked_at IS NULL \
                   ORDER BY id LIMIT $2",
             )

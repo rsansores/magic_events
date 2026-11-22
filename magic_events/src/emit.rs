@@ -32,13 +32,13 @@ use uuid::Uuid;
 /// never be published as it is: a subject token that is empty or holds a
 /// `.`, a `*`, a `>`, whitespace or anything but printable ASCII; a body
 /// larger than its stream's `max_body`
-/// ([`Settings::max_body`](crate::Settings::max_body), 64 KiB unless a relay
-/// started with another), or that is not a JSON object; a subject over
+/// ([`StreamSettings::max_body`](crate::StreamSettings::max_body), 64 KiB
+/// unless the leading relay declares another), or that is not a JSON object; a subject over
 /// 1 KiB, or a `ce-subject` over 1 KiB once percent-encoded; a value that
 /// does not serialize. [`Error::Misuse`], before anything is written, for
-/// an event of a stream no relay ever declared
-/// ([`Settings::stream`](crate::Settings::stream)): nothing would publish
-/// it. [`Error::Database`] when the database fails — the schema not
+/// an event of a stream the leading relay does not declare
+/// ([`Settings::stream`](crate::Settings::stream)) — declared by none yet,
+/// or no longer: nothing would publish it. [`Error::Database`] when the database fails — the schema not
 /// installed, say, or a role that may not write it.
 pub async fn emit<E: Event>(conn: &mut PgConnection, event: &E) -> Result<Uuid, Error> {
     let described = event.__describe();
@@ -79,10 +79,11 @@ pub async fn emit<E: Event>(conn: &mut PgConnection, event: &E) -> Result<Uuid, 
     let length = i64::try_from(body.len()).unwrap_or(i64::MAX);
     let stream = described.stream;
     // One statement: the limit the relay set for the event's stream, and the
-    // row, written only within it — and none for a stream with no relay row.
+    // row, written only within it — and none for a stream the leading relay
+    // does not declare.
     let bound: Option<(i32, bool)> = sqlx::query_as(
         "WITH bound AS ( \
-             SELECT coalesce(max_body, $6) AS max_body FROM magic_events.relay WHERE stream = $8), \
+             SELECT coalesce(max_body, $6) AS max_body FROM magic_events.relay WHERE stream = $8 AND declared), \
          written AS ( \
              INSERT INTO magic_events.outbox (event_id, stream, subject, type, headers, body) \
              SELECT $1, $8, $2, $3, $4, $5 FROM bound WHERE $7 <= bound.max_body \
@@ -101,9 +102,10 @@ pub async fn emit<E: Event>(conn: &mut PgConnection, event: &E) -> Result<Uuid, 
     .await?;
     let Some((limit, written)) = bound else {
         return Err(Error::Misuse(format!(
-            "`{ty}` goes to the stream `{stream}`, which no relay declared: declare it in the \
-             settings `Events::start` takes (`Settings::stream(\"{stream}\", …)`), and start \
-             the relay, before emitting it"
+            "`{ty}` goes to the stream `{stream}`, which the leading relay does not declare: \
+             nothing would publish it. Declare it in the settings `Events::start` takes \
+             (`Settings::stream(\"{stream}\", …)`), and emit it once a relay that declares it \
+             leads"
         )));
     };
     if !written {

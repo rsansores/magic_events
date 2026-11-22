@@ -59,9 +59,9 @@ async fn known(pool: &PgPool) -> (Broker, Events) {
 async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
     let (broker, events) = known(&pool).await;
     let prefix = broker.settings.main.subject_prefix.clone();
-    let status = events.status(&Filter::all()).await.unwrap();
+    let status = events.status(&Filter::main()).await.unwrap();
     assert_eq!(status.contract, CONTRACT);
-    assert_eq!(status.stream_key, "");
+    assert_eq!(status.key, "");
     assert_eq!(status.filter, format!("{prefix}.>"));
 
     assert_eq!((status.outbox.pending, status.outbox.parked), (1, 1));
@@ -87,7 +87,7 @@ async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
     );
 
     assert_eq!(status.broker_error, None);
-    let stream = status.stream.as_ref().unwrap();
+    let stream = status.jetstream.as_ref().unwrap();
     assert_eq!(stream.name, broker.settings.main.name);
     assert_eq!(stream.messages, 3);
     assert!(stream.bytes.is_some_and(|b| b > 0));
@@ -127,7 +127,7 @@ async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
     assert_eq!(published[0].day, status.at.date_naive());
 
     let streams: Vec<(&str, Option<&str>, u64, u64, bool)> = status
-        .streams
+        .outboxes
         .as_ref()
         .unwrap()
         .iter()
@@ -165,11 +165,11 @@ async fn a_streams_status_is_its_own(pool: PgPool) {
     let (broker, events) = known(&pool).await;
     let live = broker.stream("live").clone();
     let status = events.status(&Filter::stream("live")).await.unwrap();
-    assert_eq!(status.stream_key, "live");
+    assert_eq!(status.key, "live");
     assert_eq!(status.filter, format!("{}.>", live.subject_prefix));
     assert_eq!((status.outbox.pending, status.outbox.parked), (1, 0));
     assert!(status.relay.last_published_at.is_some());
-    let stream = status.stream.as_ref().unwrap();
+    let stream = status.jetstream.as_ref().unwrap();
     assert_eq!(
         (stream.name.as_str(), stream.messages),
         (live.name.as_str(), 2)
@@ -182,7 +182,7 @@ async fn a_streams_status_is_its_own(pool: PgPool) {
             .collect::<Vec<_>>(),
         [("order.seen.v1", 2)]
     );
-    assert_eq!(status.streams.as_ref().unwrap().len(), 2);
+    assert_eq!(status.outboxes.as_ref().unwrap().len(), 2);
 
     let south = events
         .status(&Filter::subject(format!(
@@ -191,15 +191,15 @@ async fn a_streams_status_is_its_own(pool: PgPool) {
         )))
         .await
         .unwrap();
-    assert_eq!(south.stream_key, "live");
+    assert_eq!(south.key, "live");
     assert_eq!(
-        (south.outbox.pending, south.stream.unwrap().messages),
+        (south.outbox.pending, south.jetstream.unwrap().messages),
         (1, 0)
     );
-    assert!(south.streams.is_none() && south.published.is_none());
+    assert!(south.outboxes.is_none() && south.published.is_none());
 
     let recent = events.recent(&Filter::stream("live"), 10).await.unwrap();
-    assert_eq!(recent.stream_key, "live");
+    assert_eq!(recent.key, "live");
     assert_eq!(
         recent
             .messages
@@ -230,7 +230,7 @@ async fn a_narrower_filter_answers_only_what_it_takes(pool: PgPool) {
         .unwrap();
     assert_eq!((north.outbox.pending, north.outbox.parked), (1, 0));
     assert!(north.outbox.first_parked.is_empty());
-    let stream = north.stream.as_ref().unwrap();
+    let stream = north.jetstream.as_ref().unwrap();
     assert_eq!((stream.messages, stream.subjects_total), (2, 1));
     assert_eq!(
         (stream.bytes, stream.first_at, stream.last_at),
@@ -250,8 +250,8 @@ async fn a_narrower_filter_answers_only_what_it_takes(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!((poison.outbox.pending, poison.outbox.parked), (0, 1));
-    assert_eq!(poison.stream.as_ref().unwrap().messages, 0);
-    assert!(poison.streams.is_none());
+    assert_eq!(poison.jetstream.as_ref().unwrap().messages, 0);
+    assert!(poison.outboxes.is_none());
     broker.done().await;
 }
 
@@ -285,8 +285,8 @@ async fn without_the_stream_the_status_says_why(pool: PgPool) {
         .delete_stream(&broker.settings.main.name)
         .await
         .unwrap();
-    let status = events.status(&Filter::all()).await.unwrap();
-    assert!(status.stream.is_none() && status.consumers.is_none());
+    let status = events.status(&Filter::main()).await.unwrap();
+    assert!(status.jetstream.is_none() && status.consumers.is_none());
     let why = status.broker_error.unwrap();
     assert!(why.contains("could not be read"), "{why}");
     assert_eq!(status.outbox.pending, 1, "the database's part is there");
@@ -326,12 +326,12 @@ async fn recent_reads_the_last_messages_and_leaves_nothing(pool: PgPool) {
     assert_eq!(m.sequence, 28);
 
     assert_eq!(
-        n(&events.recent(&Filter::all(), 100).await.unwrap()),
+        n(&events.recent(&Filter::main(), 100).await.unwrap()),
         (0..30).collect::<Vec<_>>()
     );
-    assert_eq!(n(&events.recent(&Filter::all(), 1).await.unwrap()), [29]);
+    assert_eq!(n(&events.recent(&Filter::main(), 1).await.unwrap()), [29]);
     assert!(events
-        .recent(&Filter::all(), 0)
+        .recent(&Filter::main(), 0)
         .await
         .unwrap()
         .messages
@@ -366,12 +366,12 @@ async fn recent_reads_the_last_messages_and_leaves_nothing(pool: PgPool) {
 async fn the_json_a_dashboard_reads_is_the_contract(pool: PgPool) {
     let (broker, events) = known(&pool).await;
     let prefix = broker.settings.main.subject_prefix.clone();
-    let all = events.status(&Filter::all()).await.unwrap();
+    let all = events.status(&Filter::main()).await.unwrap();
     let north = events
         .status(&Filter::subject(format!("{prefix}.orders.north.>")))
         .await
         .unwrap();
-    let recent = events.recent(&Filter::all(), 10).await.unwrap();
+    let recent = events.recent(&Filter::main(), 10).await.unwrap();
     let live = broker.stream("live");
     let mut stable = Stable::new(&[
         (broker.settings.main.name.as_str(), "SHOP_EVENTS"),
@@ -426,7 +426,7 @@ fn the_dashboards_types_are_generated_from_these() {
         (Parked::docs(), Parked::decl(&cfg)),
         (Relay::docs(), Relay::decl(&cfg)),
         (StreamOutbox::docs(), StreamOutbox::decl(&cfg)),
-        (Stream::docs(), Stream::decl(&cfg)),
+        (JetStream::docs(), JetStream::decl(&cfg)),
         (SubjectCount::docs(), SubjectCount::decl(&cfg)),
         (Consumer::docs(), Consumer::decl(&cfg)),
         (Published::docs(), Published::decl(&cfg)),

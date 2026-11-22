@@ -26,40 +26,9 @@ export default {
       "redelivered": 0
     }
   ],
-  "contract": 1,
+  "contract": 2,
   "filter": "shop_events.>",
-  "outbox": {
-    "first_parked": [
-      {
-        "attempts": 3,
-        "emitted_at": "2027-01-15T08:00:00.123456Z",
-        "event_id": "0192f6a0-0000-7000-8000-000000000001",
-        "id": 4,
-        "last_error": "a message the stream refuses",
-        "parked_at": "2027-01-15T08:00:00.123456Z",
-        "subject": "shop_events.orders.poison.shipped",
-        "type": "order.shipped.v1"
-      }
-    ],
-    "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
-    "parked": 1,
-    "pending": 1
-  },
-  "published": [
-    {
-      "count": 3,
-      "day": "2027-01-15",
-      "type": "order.shipped.v1"
-    }
-  ],
-  "relay": {
-    "failures": 0,
-    "last_error": null,
-    "last_published_at": "2027-01-15T08:00:00.123456Z",
-    "retry_after": null,
-    "running": false
-  },
-  "stream": {
+  "jetstream": {
     "bytes": 1035,
     "first_at": "2027-01-15T08:00:00.123456Z",
     "last_at": "2027-01-15T08:00:00.123456Z",
@@ -77,9 +46,27 @@ export default {
     ],
     "subjects_total": 2
   },
-  "stream_key": "",
-  "streams": [
+  "key": "",
+  "outbox": {
+    "first_parked": [
+      {
+        "attempts": 3,
+        "emitted_at": "2027-01-15T08:00:00.123456Z",
+        "event_id": "0192f6a0-0000-7000-8000-000000000001",
+        "id": 4,
+        "last_error": "a message the stream refuses",
+        "parked_at": "2027-01-15T08:00:00.123456Z",
+        "subject": "shop_events.orders.poison.shipped",
+        "type": "order.shipped.v1"
+      }
+    ],
+    "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
+    "parked": 1,
+    "pending": 1
+  },
+  "outboxes": [
     {
+      "declared": true,
       "failures": 0,
       "key": "",
       "last_error": null,
@@ -87,9 +74,12 @@ export default {
       "name": "SHOP_EVENTS",
       "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
       "parked": 1,
-      "pending": 1
+      "pending": 1,
+      "retry_after": null,
+      "subject_prefix": "shop_events"
     },
     {
+      "declared": true,
       "failures": 0,
       "key": "live",
       "last_error": null,
@@ -97,7 +87,23 @@ export default {
       "name": "SHOP_LIVE",
       "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
       "parked": 0,
-      "pending": 1
+      "pending": 1,
+      "retry_after": null,
+      "subject_prefix": "shop_live"
     }
-  ]
+  ],
+  "published": [
+    {
+      "count": 3,
+      "day": "2027-01-15",
+      "type": "order.shipped.v1"
+    }
+  ],
+  "relay": {
+    "failures": 0,
+    "last_error": null,
+    "last_published_at": "2027-01-15T08:00:00.123456Z",
+    "retry_after": null,
+    "running": false
+  }
 } satisfies Status

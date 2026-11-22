@@ -6,7 +6,7 @@
 //! prefix, so a host shows each viewer what is theirs and nothing else. What
 //! cannot be narrowed by subject — each consumer's lag, the counts of what
 //! was published per day, every stream's outbox — is answered only for
-//! every subject of a stream ([`Filter::all`], [`Filter::stream`]): show it
+//! every subject of a stream ([`Filter::main`], [`Filter::stream`]): show it
 //! on an operator's view.
 //!
 //! Every answer serializes as the JSON of contract [`CONTRACT`], and carries
@@ -29,7 +29,7 @@ use uuid::Uuid;
 /// The version of the JSON the answers serialize as. A field added does not
 /// change it; a field removed or renamed, or a meaning changed, does, and a
 /// dashboard refuses an answer of a contract it does not read.
-pub const CONTRACT: u32 = 1;
+pub const CONTRACT: u32 = 2;
 
 /// Parked rows an answer lists, at most: the first, in order.
 const PARKED_LISTED: i64 = 10;
@@ -56,11 +56,12 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// Every subject of the main stream: the operator's view, the only one —
-    /// with [`Filter::stream`] — that answers the consumers, the published
-    /// counts and every stream's outbox.
+    /// Every subject of the main stream: its operator's view, which — as
+    /// [`Filter::stream`]'s of another — answers the consumers, the
+    /// published counts and every stream's outbox. The same as
+    /// `Filter::stream("")`: the main stream's key is the empty one.
     #[must_use]
-    pub fn all() -> Self {
+    pub fn main() -> Self {
         Filter {
             stream: None,
             subject: None,
@@ -68,7 +69,8 @@ impl Filter {
     }
 
     /// Every subject of the stream `key` declares
-    /// ([`Settings::stream`]): its operator's view.
+    /// ([`Settings::stream`]): its operator's view. The empty key is the
+    /// main stream's.
     #[must_use]
     pub fn stream(key: impl Into<String>) -> Self {
         Filter {
@@ -194,8 +196,8 @@ fn pattern(filter: &str) -> String {
 pub struct Status {
     /// The contract this answer serializes as: `CONTRACT`.
     pub contract: u32,
-    /// The key of the stream it covers: empty for the main one.
-    pub stream_key: String,
+    /// The key of the stream it is of: empty for the main one.
+    pub key: String,
     /// The subject filter it covers, in full.
     pub filter: String,
     /// The database's clock as it answered: what the ages are counted from.
@@ -204,13 +206,13 @@ pub struct Status {
     pub outbox: Outbox,
     /// The relay of the stream, wherever it runs.
     pub relay: Relay,
-    /// Every stream of the outbox — each one declared, and one no longer
-    /// declared that still has rows — the main one first: only for every
-    /// subject.
-    pub streams: Option<Vec<StreamOutbox>>,
-    /// What the stream holds under the filter; `None` when the broker could
-    /// not be reached (`broker_error` says why).
-    pub stream: Option<Stream>,
+    /// The outbox of every stream — each one the leading relay declares, and
+    /// one it does not that still has rows — the main one first: only for
+    /// every subject.
+    pub outboxes: Option<Vec<StreamOutbox>>,
+    /// What the JetStream stream holds under the filter; `None` when the
+    /// broker could not be reached (`broker_error` says why).
+    pub jetstream: Option<JetStream>,
     /// Why the broker's part is missing, when it is.
     pub broker_error: Option<String>,
     /// Each durable consumer of the stream: only for every subject, since a
@@ -221,16 +223,20 @@ pub struct Status {
     pub published: Option<Vec<Published>>,
 }
 
-/// One stream of the outbox: what waits for it, and how its relay does.
+/// One stream's outbox: what waits for it, and how its relay does.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct StreamOutbox {
-    /// Its key: empty for the main stream.
+    /// The stream's key: empty for the main stream.
     pub key: String,
-    /// The JetStream stream the settings declare it as; `None` when they
-    /// declare it no longer: nothing publishes what waits for it.
+    /// Whether the leading relay declares it: when not, nothing publishes
+    /// what waits for it, and `emit` refuses its events.
+    pub declared: bool,
+    /// The JetStream stream a relay last declared it as, if one did.
     pub name: Option<String>,
+    /// The subject prefix a relay last declared it under, if one did.
+    pub subject_prefix: Option<String>,
     /// Rows waiting to be published, parked ones not counted.
     pub pending: u64,
     /// When the oldest of them was emitted.
@@ -243,6 +249,8 @@ pub struct StreamOutbox {
     pub failures: u32,
     /// Why the last of them failed.
     pub last_error: Option<String>,
+    /// When the relay tries the stream again after them.
+    pub retry_after: Option<DateTime<Utc>>,
 }
 
 /// What waits in the outbox.
@@ -304,11 +312,11 @@ pub struct Relay {
     pub retry_after: Option<DateTime<Utc>>,
 }
 
-/// What the stream holds under the filter.
+/// What the JetStream stream holds under the filter.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[non_exhaustive]
-pub struct Stream {
+pub struct JetStream {
     /// The stream's name.
     pub name: String,
     /// Messages held under the filter.
@@ -377,8 +385,8 @@ pub struct Published {
 pub struct Recent {
     /// The contract this answer serializes as: `CONTRACT`.
     pub contract: u32,
-    /// The key of the stream it covers: empty for the main one.
-    pub stream_key: String,
+    /// The key of the stream it is of: empty for the main one.
+    pub key: String,
     /// The subject filter it covers, in full.
     pub filter: String,
     /// The messages, oldest first.
@@ -455,12 +463,16 @@ struct RelayRow {
 #[derive(sqlx::FromRow)]
 struct StreamRow {
     key: String,
+    declared: bool,
+    name: Option<String>,
+    subject_prefix: Option<String>,
     pending: i64,
     oldest_pending_at: Option<DateTime<Utc>>,
     parked: i64,
     last_published_at: Option<DateTime<Utc>>,
     failures: i32,
     last_error: Option<String>,
+    retry_after: Option<DateTime<Utc>>,
 }
 
 /// The database's part of a status, in one snapshot.
@@ -487,7 +499,7 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
         sqlx::query_as(
             "SELECT now(), \
                     count(*) FILTER (WHERE parked_at IS NULL), \
-                    min(emitted_at) FILTER (WHERE parked_at IS NULL), \
+                    min(occurred_at) FILTER (WHERE parked_at IS NULL), \
                     count(*) FILTER (WHERE parked_at IS NOT NULL) \
                FROM magic_events.outbox WHERE stream = $1 AND ($2::text IS NULL OR subject ~ $2)",
         )
@@ -497,7 +509,7 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
         .await?;
     let first_parked: Vec<ParkedRow> = sqlx::query_as(
         "SELECT id, event_id, $1 || '.' || subject AS subject, type, attempts, last_error, \
-                emitted_at, parked_at \
+                occurred_at AS emitted_at, parked_at \
            FROM magic_events.outbox \
           WHERE stream = $2 AND parked_at IS NOT NULL AND ($3::text IS NULL OR subject ~ $3) \
           ORDER BY id LIMIT $4",
@@ -508,13 +520,16 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
     .bind(PARKED_LISTED)
     .fetch_all(&mut *tx)
     .await?;
+    // A stream these settings declare and no relay has yet — another leads,
+    // with other settings — has no row: nothing published, nothing failed.
     let relay: RelayRow = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted \
                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
                    AND objsubid = 1 AND classid = ($1::bigint >> 32)::oid \
                    AND objid = ($1::bigint & 4294967295)::oid) AS running, \
-                last_published_at, failures, last_error, retry_after \
-           FROM magic_events.relay WHERE stream = $2",
+                r.last_published_at, coalesce(r.failures, 0) AS failures, r.last_error, \
+                r.retry_after \
+           FROM (SELECT 1) AS one LEFT JOIN magic_events.relay r ON r.stream = $2",
     )
     .bind(LOCK_KEY)
     .bind(key)
@@ -522,14 +537,15 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
     .await?;
     let (streams, published) = if scope.all {
         let streams: Vec<StreamRow> = sqlx::query_as(
-            "SELECT coalesce(r.stream, o.stream) AS key, \
+            "SELECT coalesce(r.stream, o.stream) AS key, coalesce(r.declared, false) AS declared, \
+                    r.name, r.subject_prefix, \
                     coalesce(o.pending, 0) AS pending, o.oldest_pending_at, \
                     coalesce(o.parked, 0) AS parked, r.last_published_at, \
-                    coalesce(r.failures, 0) AS failures, r.last_error \
+                    coalesce(r.failures, 0) AS failures, r.last_error, r.retry_after \
                FROM magic_events.relay r \
                FULL JOIN (SELECT stream, \
                                  count(*) FILTER (WHERE parked_at IS NULL) AS pending, \
-                                 min(emitted_at) FILTER (WHERE parked_at IS NULL) AS oldest_pending_at, \
+                                 min(occurred_at) FILTER (WHERE parked_at IS NULL) AS oldest_pending_at, \
                                  count(*) FILTER (WHERE parked_at IS NOT NULL) AS parked \
                             FROM magic_events.outbox GROUP BY stream) o ON o.stream = r.stream \
               ORDER BY 1",
@@ -552,7 +568,7 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
     tx.commit().await?;
     Ok(Status {
         contract: CONTRACT,
-        stream_key: key.to_owned(),
+        key: key.to_owned(),
         filter: scope.subject.clone(),
         at,
         outbox: Outbox {
@@ -580,23 +596,27 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
             last_error: relay.last_error,
             retry_after: relay.retry_after,
         },
-        // A stream no longer declared is listed while rows wait for it.
-        streams: streams.map(|rows| {
+        // A stream the leading relay does not declare is listed while rows
+        // wait for it.
+        outboxes: streams.map(|rows| {
             rows.into_iter()
                 .map(|r| StreamOutbox {
-                    name: settings.find(&r.key).map(|d| d.stream.name.clone()),
                     key: r.key,
+                    declared: r.declared,
+                    name: r.name,
+                    subject_prefix: r.subject_prefix,
                     pending: r.pending.unsigned_abs(),
                     oldest_pending_at: r.oldest_pending_at,
                     parked: r.parked.unsigned_abs(),
                     last_published_at: r.last_published_at,
                     failures: u32::try_from(r.failures).unwrap_or(0),
                     last_error: r.last_error,
+                    retry_after: r.retry_after,
                 })
-                .filter(|s| s.name.is_some() || s.pending > 0 || s.parked > 0)
+                .filter(|s| s.declared || s.pending > 0 || s.parked > 0)
                 .collect()
         }),
-        stream: None,
+        jetstream: None,
         broker_error: None,
         consumers: None,
         published: published.map(|rows| {
@@ -618,7 +638,7 @@ async fn broker(
     name: &str,
     filter: &str,
     all: bool,
-) -> Result<(Stream, Option<Vec<Consumer>>), String> {
+) -> Result<(JetStream, Option<Vec<Consumer>>), String> {
     let stream = jetstream
         .get_stream(name)
         .await
@@ -644,7 +664,7 @@ async fn broker(
     };
     counts.truncate(SUBJECTS_LISTED);
     let held = state.messages > 0;
-    let stream_status = Stream {
+    let stream_status = JetStream {
         name: name.to_owned(),
         messages,
         bytes: all.then_some(state.bytes),
@@ -715,7 +735,7 @@ pub(crate) async fn status(
     .unwrap_or_else(|_| Err(format!("the broker did not answer within {BROKER_WAIT:?}")))
     {
         Ok((stream, consumers)) => {
-            status.stream = Some(stream);
+            status.jetstream = Some(stream);
             status.consumers = consumers;
         }
         Err(why) => status.broker_error = Some(why),
@@ -744,7 +764,7 @@ pub(crate) async fn recent(
         };
         Ok(Recent {
             contract: CONTRACT,
-            stream_key: scope.declared.key.to_owned(),
+            key: scope.declared.key.to_owned(),
             filter: scope.subject.clone(),
             messages,
         })
