@@ -8,7 +8,14 @@
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
 import type { Recent, Status } from '../core/contract/types.js'
 import { bannerOf, mismatchOf, type Speech } from '../core/describe.js'
-import { consumersOf, healthOf, publishedByDay, publishedByType, recentOf } from '../core/derive.js'
+import {
+  consumersOf,
+  healthOf,
+  publishedByDay,
+  publishedByType,
+  recentOf,
+  streamsOf,
+} from '../core/derive.js'
 import type { Messages } from '../core/i18n.js'
 import { timeOf } from '../core/time.js'
 import { useServerClock } from './clock.js'
@@ -69,6 +76,12 @@ export function useEventsView(
   const consumers = computed(() =>
     usable.value?.consumers ? consumersOf(usable.value, toValue(options.consumerLag)) : null,
   )
+  /** Every stream of the outbox, when there is more than the one the
+   * answer is of, or one no settings declare; null for a narrowed view. */
+  const streams = computed(() => {
+    const rows = usable.value ? streamsOf(usable.value) : []
+    return rows.length > 1 || rows.some((s) => s.name == null) ? rows : null
+  })
   const published = computed(() =>
     usable.value?.published
       ? { byDay: publishedByDay(usable.value), byType: publishedByType(usable.value) }
@@ -90,6 +103,7 @@ export function useEventsView(
     health,
     banner,
     consumers,
+    streams,
     published,
     oldestPending,
     lastPublished,

@@ -46,6 +46,9 @@ describe('the sentences', () => {
     expect(describeReason({ kind: 'consumer_behind', name: 'billing', n: 1200 }, speech)).toEqual([
       'billing is 1,200 messages behind.',
     ])
+    expect(describeReason({ kind: 'stream_undeclared', key: 'live', n: 1 }, speech)).toEqual([
+      'The stream “live” is declared by no relay any more: 1 event waits for it, and nothing publishes it.',
+    ])
   })
 
   it('say when the last event left, or that none has', () => {

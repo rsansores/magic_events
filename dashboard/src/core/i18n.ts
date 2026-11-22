@@ -41,6 +41,11 @@ const en: MessageTable = {
     one: '{name} is {n} message behind.',
     other: '{name} is {n} messages behind.',
   },
+  'reason.stream_undeclared': {
+    one: 'The stream “{key}” is declared by no relay any more: {n} event waits for it, and nothing publishes it.',
+    other:
+      'The stream “{key}” is declared by no relay any more: {n} events wait for it, and nothing publishes them.',
+  },
   loading: 'Loading…',
   'fetch.failed': 'The status could not be fetched: {error}',
   'contract.mismatch':
@@ -74,6 +79,14 @@ const en: MessageTable = {
     one: 'And {n} more subject.',
     other: 'And {n} more subjects.',
   },
+  'streams.title': 'Streams',
+  'streams.stream': 'Stream',
+  'streams.main': 'main',
+  'streams.undeclared': 'not declared',
+  'streams.pending': 'Waiting',
+  'streams.parked': 'Set aside',
+  'streams.failures': 'Failed passes',
+  'streams.last_published': 'Last published',
   'consumers.title': 'Consumers',
   'consumers.none': 'No system reads the stream yet.',
   'consumer.name': 'Consumer',

@@ -71,6 +71,13 @@ store's subjects, say) leaves both out, and the dashboard leaves out their
 sections: a consumer's lag is the whole stream's, and the counts are kept
 by type alone, so neither can be narrowed by subject.
 
+A status is of one stream: the main one for `Filter::all()`, another for
+`Filter::stream("live")`. A host with several shows a dashboard per stream.
+An operator's view of any of them also lists every stream of the outbox —
+what waits for each, and its failed passes — as a table when there are
+several, and is **stuck** while events wait for a stream no relay declares
+any more, since no dashboard of that stream will say so.
+
 ### Its look
 
 Every colour and size is a CSS variable; set them on `.med` or any ancestor:
@@ -126,6 +133,7 @@ dash.banner.value // { mood: 'ok' | 'lagging' | 'stuck' | 'down', title, lines }
 dash.health.value // { mood, reasons }: each reason a fact, worst first
 dash.status.value // the answer itself, once it reads
 dash.consumers.value // furthest behind first; null for a narrowed view
+dash.streams.value // every stream of the outbox, main first; null for one, or a narrowed view
 dash.published.value // { byDay, byType }; null for a narrowed view
 dash.refresh() // fetch now
 ```
@@ -159,7 +167,7 @@ const recent = useQuery({
 
 const view = useEventsView(status.data, { recent: recent.data })
 view.error.value // another contract, or a time that does not read; null while there is no answer
-view.banner.value // as above, and health, status, consumers, published, speech
+view.banner.value // as above, and health, status, consumers, streams, published, speech
 view.recent.value // the recent events, newest first; null without an answer that reads
 view.recentError.value // a recent answer of another contract, or null
 ```
@@ -168,8 +176,8 @@ A failed or pending read is the data layer's to say (`status.isError`,
 `status.isPending`): `useEventsView` has no fetch of its own to fail.
 
 Everything that does not need Vue — the types, `healthOf`, `consumersOf`,
-`publishedByDay`, `publishedByType`, `recentOf`, the sentence functions and
-`translator` — is also in `magic_events_dashboard/core`.
+`streamsOf`, `publishedByDay`, `publishedByType`, `recentOf`, the sentence
+functions and `translator` — is also in `magic_events_dashboard/core`.
 
 ## Languages
 

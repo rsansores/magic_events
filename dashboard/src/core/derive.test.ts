@@ -3,7 +3,15 @@ import type { Status } from './contract/types.js'
 import status from './contract/fixtures/status.js'
 import narrowed from './contract/fixtures/narrowed.js'
 import recent from './contract/fixtures/recent.js'
-import { consumersOf, healthOf, publishedByDay, publishedByType, readsContract, recentOf } from './derive.js'
+import {
+  consumersOf,
+  healthOf,
+  publishedByDay,
+  publishedByType,
+  readsContract,
+  recentOf,
+  streamsOf,
+} from './derive.js'
 import { parseTimestamp } from './time.js'
 
 const at = parseTimestamp(status.at)!
@@ -85,6 +93,17 @@ describe('healthOf', () => {
     })
   })
 
+  it('is stuck while events wait for a stream no relay declares any more, and names it', () => {
+    const undeclared = with_((s) => {
+      s.streams![1]!.name = null
+      s.streams![1]!.parked = 2
+    }, calm)
+    expect(healthOf(undeclared, { now: at })).toEqual({
+      mood: 'stuck',
+      reasons: [{ kind: 'stream_undeclared', key: 'live', n: 3 }],
+    })
+  })
+
   it('lists the worst reason first', () => {
     const many = with_((s) => {
       s.relay.running = false
@@ -111,6 +130,15 @@ describe('the rest of what an answer comes to', () => {
       ['shipping', 2, false, null],
     ])
     expect(consumersOf(narrowed)).toEqual([])
+  })
+
+  it('lists every stream of the outbox, the main one first, the one answered marked', () => {
+    expect(streamsOf(status).map((s) => [s.key, s.name, s.pending, s.parked, s.current])).toEqual([
+      ['', 'SHOP_EVENTS', 1, 1, true],
+      ['live', 'SHOP_LIVE', 1, 0, false],
+    ])
+    expect(streamsOf(status)[1]).toMatchObject({ failures: 0, lastError: null, lastPublished: at })
+    expect(streamsOf(narrowed)).toEqual([])
   })
 
   it('counts what was published by day and by type', () => {
