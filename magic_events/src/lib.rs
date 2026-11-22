@@ -56,6 +56,8 @@
 //!   database error ([`Error::Database`]).
 //! - [`async_nats`] 0.50: the JetStream context the relay publishes through.
 //! - [`uuid`] 1: an event's id is a [`uuid::Uuid`].
+//! - [`time`] 0.3: every time the status answers, and a delivery's `ce-time`,
+//!   is a [`time::OffsetDateTime`].
 //! - [`serde`] 1: an event is `Serialize`.
 
 #![warn(missing_docs, clippy::missing_errors_doc)]

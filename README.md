@@ -581,10 +581,11 @@ with no fact behind it — record the fact, and emit with it.
 ## Status
 
 `0.2`. The API may change before `1.0`. PostgreSQL 14 or later,
-[sqlx] 0.8, [async-nats] 0.50, Rust 1.88 or later.
+[sqlx] 0.8, [async-nats] 0.50, [time] 0.3, Rust 1.88 or later.
 
 [sqlx]: https://crates.io/crates/sqlx
 [async-nats]: https://crates.io/crates/async-nats
+[time]: https://crates.io/crates/time
 
 ## License
 

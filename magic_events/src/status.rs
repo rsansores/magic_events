@@ -18,12 +18,12 @@ use crate::stream::{covers, subjects};
 use crate::Error;
 use async_nats::jetstream::consumer::{pull::OrderedConfig, DeliverPolicy};
 use async_nats::jetstream::Context;
-use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 /// The version of the JSON the answers serialize as. A field added does not
@@ -201,7 +201,9 @@ pub struct Status {
     /// The subject filter it covers, in full.
     pub filter: String,
     /// The database's clock as it answered: what the ages are counted from.
-    pub at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(test, ts(type = "string"))]
+    pub at: OffsetDateTime,
     /// What waits in the outbox, under the filter.
     pub outbox: Outbox,
     /// The relay of the stream, wherever it runs.
@@ -240,17 +242,23 @@ pub struct StreamOutbox {
     /// Rows waiting to be published, parked ones not counted.
     pub pending: u64,
     /// When the oldest of them was emitted.
-    pub oldest_pending_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub oldest_pending_at: Option<OffsetDateTime>,
     /// Rows the broker refused for good, waiting for `unpark`.
     pub parked: u64,
     /// When the stream last acknowledged a message.
-    pub last_published_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub last_published_at: Option<OffsetDateTime>,
     /// Passes the broker failed in a row; 0 once one goes through.
     pub failures: u32,
     /// Why the last of them failed.
     pub last_error: Option<String>,
     /// When the relay tries the stream again after them.
-    pub retry_after: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub retry_after: Option<OffsetDateTime>,
 }
 
 /// What waits in the outbox.
@@ -261,7 +269,9 @@ pub struct Outbox {
     /// Rows waiting to be published, parked ones not counted.
     pub pending: u64,
     /// When the oldest of them was emitted.
-    pub oldest_pending_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub oldest_pending_at: Option<OffsetDateTime>,
     /// Rows the broker refused for good, waiting for `unpark`.
     pub parked: u64,
     /// The first of them, in order, up to ten.
@@ -288,9 +298,13 @@ pub struct Parked {
     /// Why, the last time.
     pub last_error: Option<String>,
     /// When it was emitted.
-    pub emitted_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(test, ts(type = "string"))]
+    pub emitted_at: OffsetDateTime,
     /// When it was set aside.
-    pub parked_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(test, ts(type = "string"))]
+    pub parked_at: OffsetDateTime,
 }
 
 /// The relay of one stream, wherever it runs.
@@ -302,14 +316,18 @@ pub struct Relay {
     /// every stream.
     pub running: bool,
     /// When the stream last acknowledged a message.
-    pub last_published_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub last_published_at: Option<OffsetDateTime>,
     /// Passes of the stream the broker failed in a row; 0 once one goes
     /// through.
     pub failures: u32,
     /// Why the last of them failed.
     pub last_error: Option<String>,
     /// When the relay tries again after them.
-    pub retry_after: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub retry_after: Option<OffsetDateTime>,
 }
 
 /// What the JetStream stream holds under the filter.
@@ -324,9 +342,13 @@ pub struct JetStream {
     /// Bytes the stream holds: only for every subject.
     pub bytes: Option<u64>,
     /// When its first message was published: only for every subject.
-    pub first_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub first_at: Option<OffsetDateTime>,
     /// When its last message was published: only for every subject.
-    pub last_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub last_at: Option<OffsetDateTime>,
     /// Subjects under the filter with messages held.
     pub subjects_total: u64,
     /// The hundred of them with the most messages, the most first.
@@ -360,7 +382,9 @@ pub struct Consumer {
     /// Messages delivered more than once.
     pub redelivered: u64,
     /// When it was last delivered a message.
-    pub last_active: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub last_active: Option<OffsetDateTime>,
 }
 
 /// Messages published on one day, of one type.
@@ -369,7 +393,9 @@ pub struct Consumer {
 #[non_exhaustive]
 pub struct Published {
     /// The day, UTC, as `2027-01-15`.
-    pub day: NaiveDate,
+    #[serde(serialize_with = "day")]
+    #[cfg_attr(test, ts(type = "string"))]
+    pub day: Date,
     /// The `ce-type`, as `order.shipped.v1`.
     #[serde(rename = "type")]
     pub ty: String,
@@ -403,36 +429,25 @@ pub struct Message {
     /// Its subject.
     pub subject: String,
     /// When the stream took it.
-    pub time: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(test, ts(type = "string"))]
+    pub time: OffsetDateTime,
     /// Its headers, by name: the CloudEvents attributes among them.
     pub headers: BTreeMap<String, String>,
     /// Its body, as text.
     pub body: String,
 }
 
-/// A time as the broker's client answers it: `time`'s by default, `chrono`'s
-/// when anything in the build enables its `chrono` feature — either way, a
-/// `DateTime<Utc>` here.
-trait BrokerTime {
-    fn utc(self) -> Option<DateTime<Utc>>;
+/// A time as the broker's client answers it: `time`'s, or `chrono`'s when
+/// anything in the build enables async-nats' `chrono` feature — either way
+/// a time of the system's, and an `OffsetDateTime` here.
+fn utc(t: impl Into<std::time::SystemTime>) -> OffsetDateTime {
+    OffsetDateTime::from(t.into())
 }
 
-impl BrokerTime for time::OffsetDateTime {
-    fn utc(self) -> Option<DateTime<Utc>> {
-        i64::try_from(self.unix_timestamp_nanos())
-            .ok()
-            .map(DateTime::from_timestamp_nanos)
-    }
-}
-
-impl BrokerTime for DateTime<Utc> {
-    fn utc(self) -> Option<DateTime<Utc>> {
-        Some(self)
-    }
-}
-
-fn utc(t: impl BrokerTime) -> Option<DateTime<Utc>> {
-    t.utc()
+/// A day as `2027-01-15`.
+fn day<S: serde::Serializer>(day: &Date, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(day)
 }
 
 /// A parked row, as the database reads it.
@@ -445,18 +460,18 @@ struct ParkedRow {
     ty: String,
     attempts: i32,
     last_error: Option<String>,
-    emitted_at: DateTime<Utc>,
-    parked_at: DateTime<Utc>,
+    emitted_at: OffsetDateTime,
+    parked_at: OffsetDateTime,
 }
 
 /// The relay's row, and whether a process holds its lock.
 #[derive(sqlx::FromRow)]
 struct RelayRow {
     running: bool,
-    last_published_at: Option<DateTime<Utc>>,
+    last_published_at: Option<OffsetDateTime>,
     failures: i32,
     last_error: Option<String>,
-    retry_after: Option<DateTime<Utc>>,
+    retry_after: Option<OffsetDateTime>,
 }
 
 /// A stream of the outbox, as the database reads it.
@@ -467,12 +482,12 @@ struct StreamRow {
     name: Option<String>,
     subject_prefix: Option<String>,
     pending: i64,
-    oldest_pending_at: Option<DateTime<Utc>>,
+    oldest_pending_at: Option<OffsetDateTime>,
     parked: i64,
-    last_published_at: Option<DateTime<Utc>>,
+    last_published_at: Option<OffsetDateTime>,
     failures: i32,
     last_error: Option<String>,
-    retry_after: Option<DateTime<Utc>>,
+    retry_after: Option<OffsetDateTime>,
 }
 
 /// The database's part of a status, in one snapshot.
@@ -495,7 +510,7 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
     // Every subject under the prefix is every row of the stream: no pattern
     // to match.
     let pattern = scope.pattern();
-    let (at, pending, oldest, parked): (DateTime<Utc>, i64, Option<DateTime<Utc>>, i64) =
+    let (at, pending, oldest, parked): (OffsetDateTime, i64, Option<OffsetDateTime>, i64) =
         sqlx::query_as(
             "SELECT now(), \
                     count(*) FILTER (WHERE parked_at IS NULL), \
@@ -552,7 +567,7 @@ async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Resu
         )
         .fetch_all(&mut *tx)
         .await?;
-        let published: Vec<(NaiveDate, String, i64)> = sqlx::query_as(
+        let published: Vec<(Date, String, i64)> = sqlx::query_as(
             "SELECT day, type, count FROM magic_events.published \
               WHERE stream = $1 AND day > (now() AT TIME ZONE 'UTC')::date - $2 \
               ORDER BY day DESC, type",
@@ -669,12 +684,12 @@ async fn broker(
         messages,
         bytes: all.then_some(state.bytes),
         first_at: if all && held {
-            utc(state.first_timestamp)
+            Some(utc(state.first_timestamp))
         } else {
             None
         },
         last_at: if all && held {
-            utc(state.last_timestamp)
+            Some(utc(state.last_timestamp))
         } else {
             None
         },
@@ -696,7 +711,7 @@ async fn broker(
                     pending: c.num_pending,
                     ack_pending: u64::try_from(c.num_ack_pending).unwrap_or(u64::MAX),
                     redelivered: u64::try_from(c.num_redelivered).unwrap_or(u64::MAX),
-                    last_active: c.delivered.last_active.and_then(utc),
+                    last_active: c.delivered.last_active.map(utc),
                 }
             })
             .try_collect()
@@ -874,7 +889,7 @@ async fn round(
         found.push_back(Message {
             sequence,
             subject: message.subject.to_string(),
-            time: time.unwrap_or_default(),
+            time,
             headers,
             body: String::from_utf8_lossy(&message.payload).into_owned(),
         });

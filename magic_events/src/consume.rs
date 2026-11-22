@@ -5,11 +5,12 @@
 use crate::{Error, Event};
 use async_nats::jetstream::consumer::{pull, AckPolicy};
 use async_nats::jetstream::{AckKind, Context};
-use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::de::{self, DeserializeOwned, IntoDeserializer};
 use std::future::Future;
 use std::time::Duration;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 /// One event as the stream delivered it.
 #[derive(Clone, Debug)]
@@ -23,7 +24,7 @@ pub struct Delivery<E> {
     /// The subject it was published on.
     pub subject: String,
     /// When it was emitted, its `ce-time`.
-    pub time: Option<DateTime<Utc>>,
+    pub time: Option<OffsetDateTime>,
     /// How many times it was delivered before this one.
     pub redelivered: u64,
 }
@@ -215,9 +216,7 @@ where
             id,
             event,
             subject: message.subject.to_string(),
-            time: header("ce-time")
-                .and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
-                .map(|t| t.with_timezone(&Utc)),
+            time: header("ce-time").and_then(|t| OffsetDateTime::parse(&t, &Rfc3339).ok()),
             redelivered,
         };
         let handled = handler(delivery);

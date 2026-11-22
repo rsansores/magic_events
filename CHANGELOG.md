@@ -76,6 +76,11 @@ Upgrading from 0.1:
     `Events::unpark_all(&Filter::main())`.
   - `status::Stream` is `status::JetStream`, and `Status::stream` is
     `Status::jetstream`.
+  - Times are `time`'s, not `chrono`'s, which is unmaintained
+    (RUSTSEC-2026-0543): every time of the status, and `Delivery::time`, is
+    a `time::OffsetDateTime`, and `Published::day` a `time::Date`. Their
+    JSON is the same RFC 3339, and the crate no longer depends on `chrono`,
+    nor turns on sqlx's `chrono` feature.
   - Added: `StreamSettings`, `Settings::stream`, `Filter::stream`,
     `Events::retire`, `Status::key`, `Status::outboxes`, `StreamOutbox`,
     `Recent::key`, `SCHEMA_VERSION` 2, and the derive's `stream` key.
