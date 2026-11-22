@@ -82,6 +82,32 @@ mod enums {
     }
 }
 
+fn streams() -> magic_events::Settings {
+    use magic_events::{Settings, StreamSettings};
+    use std::time::Duration;
+
+    // A screen's own event: kept for ten minutes, read by no one else.
+    #[derive(serde::Serialize, magic_events::Event)]
+    #[event(
+        type = "order.seen",
+        version = 1,
+        subject = "orders.{store}.seen",
+        stream = "live"
+    )]
+    pub struct OrderSeen {
+        pub store: StoreId,
+        pub ids: Vec<OrderId>,
+    }
+
+    // Once, in main: the main stream, and `live` beside it.
+    let settings = Settings::new("SHOP_EVENTS", "//shop.example.com").stream(
+        "live",
+        StreamSettings::new("SHOP_LIVE").retention(Duration::from_secs(10 * 60)),
+    );
+    let _: Option<OrderSeen> = None;
+    settings
+}
+
 async fn install(pool: PgPool) -> Result<(), Error> {
     // A host with no migrations of its own: once, at start, before anything emits.
     magic_events::Events::install(&pool).await?;
@@ -138,14 +164,17 @@ async fn status(events: magic_events::Events) -> Result<String, Error> {
     let one_store = events
         .status(&Filter::subject("shop_events.orders.7.>"))
         .await?;
+    let live = events.status(&Filter::stream("live")).await?;
     let last_ten = events.recent(&Filter::all(), 10).await?;
-    Ok(serde_json::to_string(&(status, one_store, last_ten))?)
+    Ok(serde_json::to_string(&(status, one_store, live, last_ten))?)
 }
 
 async fn unpark(events: magic_events::Events, id: i64) -> Result<(), Error> {
+    use magic_events::status::Filter;
+
     // After fixing what the broker refused: send it again with the next pass.
     events.unpark(id).await?;
-    events.unpark_all().await?;
+    events.unpark_all(&Filter::all()).await?;
     Ok(())
 }
 
@@ -203,7 +232,7 @@ fn code(text: &str) -> Vec<String> {
 #[test]
 fn the_readmes_code_compiles() {
     let _ = (
-        hero, install, migrations, settings, status, unpark, no_write,
+        hero, streams, install, migrations, settings, status, unpark, no_write,
     );
     #[cfg(feature = "consume")]
     let _ = billing;

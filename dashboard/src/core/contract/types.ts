@@ -5,13 +5,17 @@ export const CONTRACT = 1
 
 /**
  * What `Events::status` answers: the relay, the outbox and the
- * stream, as one filter sees them.
+ * stream, as one filter sees them — of one stream.
  */
 export type Status = { 
 /**
  * The contract this answer serializes as: `CONTRACT`.
  */
 contract: number, 
+/**
+ * The key of the stream it covers: empty for the main one.
+ */
+stream_key: string, 
 /**
  * The subject filter it covers, in full.
  */
@@ -25,9 +29,15 @@ at: string,
  */
 outbox: Outbox, 
 /**
- * The relay, wherever it runs.
+ * The relay of the stream, wherever it runs.
  */
 relay: Relay, 
+/**
+ * Every stream of the outbox — each one declared, and one no longer
+ * declared that still has rows — the main one first: only for every
+ * subject.
+ */
+streams: Array<StreamOutbox> | null, 
 /**
  * What the stream holds under the filter; `None` when the broker could
  * not be reached (`broker_error` says why).
@@ -43,8 +53,8 @@ broker_error: string | null,
  */
 consumers: Array<Consumer> | null, 
 /**
- * Messages published per day (UTC) and type, the last 30 days: only
- * for every subject, since they are counted by type alone.
+ * Messages of the stream published per day (UTC) and type, the last 30
+ * days: only for every subject, since they are counted by type alone.
  */
 published: Array<Published> | null, };
 
@@ -108,13 +118,57 @@ emitted_at: string,
 parked_at: string, };
 
 /**
- * The relay, wherever it runs.
+ * The relay of one stream, wherever it runs.
  */
 export type Relay = { 
 /**
- * Whether a process holds the relay's lock now.
+ * Whether a process holds the relay's lock now: one relay publishes
+ * every stream.
  */
 running: boolean, 
+/**
+ * When the stream last acknowledged a message.
+ */
+last_published_at: string | null, 
+/**
+ * Passes of the stream the broker failed in a row; 0 once one goes
+ * through.
+ */
+failures: number, 
+/**
+ * Why the last of them failed.
+ */
+last_error: string | null, 
+/**
+ * When the relay tries again after them.
+ */
+retry_after: string | null, };
+
+/**
+ * One stream of the outbox: what waits for it, and how its relay does.
+ */
+export type StreamOutbox = { 
+/**
+ * Its key: empty for the main stream.
+ */
+key: string, 
+/**
+ * The JetStream stream the settings declare it as; `None` when they
+ * declare it no longer: nothing publishes what waits for it.
+ */
+name: string | null, 
+/**
+ * Rows waiting to be published, parked ones not counted.
+ */
+pending: number, 
+/**
+ * When the oldest of them was emitted.
+ */
+oldest_pending_at: string | null, 
+/**
+ * Rows the broker refused for good, waiting for `unpark`.
+ */
+parked: number, 
 /**
  * When the stream last acknowledged a message.
  */
@@ -126,11 +180,7 @@ failures: number,
 /**
  * Why the last of them failed.
  */
-last_error: string | null, 
-/**
- * When the relay tries again after them.
- */
-retry_after: string | null, };
+last_error: string | null, };
 
 /**
  * What the stream holds under the filter.
@@ -233,6 +283,10 @@ export type Recent = {
  * The contract this answer serializes as: `CONTRACT`.
  */
 contract: number, 
+/**
+ * The key of the stream it covers: empty for the main one.
+ */
+stream_key: string, 
 /**
  * The subject filter it covers, in full.
  */

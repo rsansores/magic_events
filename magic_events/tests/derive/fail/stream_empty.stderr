@@ -1,0 +1,5 @@
+error: an empty stream key: an event of the main stream says no `stream`, and one of another names its key, as `live`
+ --> tests/derive/fail/stream_empty.rs:2:77
+  |
+2 | #[event(type = "order.seen", version = 1, subject = "orders.seen", stream = "")]
+  |                                                                             ^^

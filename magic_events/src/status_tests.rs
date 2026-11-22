@@ -3,16 +3,18 @@
 //! dashboard's fixtures; and `recent`, which leaves nothing behind.
 
 use super::*;
-use crate::tests::{emit_each, idle, shipped, Broker, Faulty};
+use crate::tests::{emit_each, idle, seen, shipped, Broker, Faulty};
 use crate::Events;
 use async_nats::jetstream::consumer::pull;
 use std::sync::Arc;
 
-/// The known state: three messages published (two to `north`, one to
-/// `south`), one parked (`poison`), one pending (`north`); two durable
-/// consumers, `billing` of every order and `shipping` of the north's.
+/// The known state, on the main stream: three messages published (two to
+/// `north`, one to `south`), one parked (`poison`), one pending (`north`);
+/// two durable consumers, `billing` of every order and `shipping` of the
+/// north's. On the stream `live`: two published (`north`), one pending
+/// (`south`).
 async fn known(pool: &PgPool) -> (Broker, Events) {
-    let broker = Broker::new().await;
+    let broker = Broker::live().await;
     let faulty = Faulty::new(broker.jetstream.clone());
     let events = idle(pool, &broker, Arc::new(faulty)).await;
     emit_each(
@@ -25,14 +27,16 @@ async fn known(pool: &PgPool) -> (Broker, Events) {
         ],
     )
     .await;
+    emit_each(pool, &[seen("north", 1), seen("north", 2)]).await;
     for _ in 0..3 {
         events.pass_now().await.unwrap();
     }
     emit_each(pool, &[shipped("north", 5)]).await;
-    let prefix = &broker.settings.subject_prefix;
+    emit_each(pool, &[seen("south", 3)]).await;
+    let prefix = &broker.settings.main.subject_prefix;
     let stream = broker
         .jetstream
-        .get_stream(&broker.settings.stream)
+        .get_stream(&broker.settings.main.name)
         .await
         .unwrap();
     for (name, filter) in [
@@ -54,9 +58,10 @@ async fn known(pool: &PgPool) -> (Broker, Events) {
 #[sqlx::test(migrations = false)]
 async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
     let (broker, events) = known(&pool).await;
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     let status = events.status(&Filter::all()).await.unwrap();
     assert_eq!(status.contract, CONTRACT);
+    assert_eq!(status.stream_key, "");
     assert_eq!(status.filter, format!("{prefix}.>"));
 
     assert_eq!((status.outbox.pending, status.outbox.parked), (1, 1));
@@ -83,7 +88,7 @@ async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
 
     assert_eq!(status.broker_error, None);
     let stream = status.stream.as_ref().unwrap();
-    assert_eq!(stream.name, broker.settings.stream);
+    assert_eq!(stream.name, broker.settings.main.name);
     assert_eq!(stream.messages, 3);
     assert!(stream.bytes.is_some_and(|b| b > 0));
     assert!(stream.first_at.is_some() && stream.last_at.is_some());
@@ -120,6 +125,96 @@ async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
         ("order.shipped.v1", 3)
     );
     assert_eq!(published[0].day, status.at.date_naive());
+
+    let streams: Vec<(&str, Option<&str>, u64, u64, bool)> = status
+        .streams
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s.key.as_str(),
+                s.name.as_deref(),
+                s.pending,
+                s.parked,
+                s.last_published_at.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        streams,
+        [
+            ("", Some(broker.stream("").name.as_str()), 1, 1, true),
+            (
+                "live",
+                Some(broker.stream("live").name.as_str()),
+                1,
+                0,
+                true
+            )
+        ]
+    );
+    broker.done().await;
+}
+
+/// Another stream's status is its own, all of it: its outbox, its relay
+/// row, its stream, its counts. A subject filter is answered by the stream
+/// whose prefix it is under.
+#[sqlx::test(migrations = false)]
+async fn a_streams_status_is_its_own(pool: PgPool) {
+    let (broker, events) = known(&pool).await;
+    let live = broker.stream("live").clone();
+    let status = events.status(&Filter::stream("live")).await.unwrap();
+    assert_eq!(status.stream_key, "live");
+    assert_eq!(status.filter, format!("{}.>", live.subject_prefix));
+    assert_eq!((status.outbox.pending, status.outbox.parked), (1, 0));
+    assert!(status.relay.last_published_at.is_some());
+    let stream = status.stream.as_ref().unwrap();
+    assert_eq!(
+        (stream.name.as_str(), stream.messages),
+        (live.name.as_str(), 2)
+    );
+    let published = status.published.as_ref().unwrap();
+    assert_eq!(
+        published
+            .iter()
+            .map(|p| (p.ty.as_str(), p.count))
+            .collect::<Vec<_>>(),
+        [("order.seen.v1", 2)]
+    );
+    assert_eq!(status.streams.as_ref().unwrap().len(), 2);
+
+    let south = events
+        .status(&Filter::subject(format!(
+            "{}.orders.south.>",
+            live.subject_prefix
+        )))
+        .await
+        .unwrap();
+    assert_eq!(south.stream_key, "live");
+    assert_eq!(
+        (south.outbox.pending, south.stream.unwrap().messages),
+        (1, 0)
+    );
+    assert!(south.streams.is_none() && south.published.is_none());
+
+    let recent = events.recent(&Filter::stream("live"), 10).await.unwrap();
+    assert_eq!(recent.stream_key, "live");
+    assert_eq!(
+        recent
+            .messages
+            .iter()
+            .map(|m| m.subject.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!("{}.orders.north.seen", live.subject_prefix); 2]
+    );
+
+    match events.status(&Filter::stream("gone")).await {
+        Err(crate::Error::Misuse(why)) => {
+            assert!(why.contains("no stream `gone` is declared"), "{why}")
+        }
+        other => panic!("{other:?}"),
+    }
     broker.done().await;
 }
 
@@ -128,7 +223,7 @@ async fn every_field_of_the_status_under_every_subject(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn a_narrower_filter_answers_only_what_it_takes(pool: PgPool) {
     let (broker, events) = known(&pool).await;
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     let north = events
         .status(&Filter::subject(format!("{prefix}.orders.north.>")))
         .await
@@ -156,13 +251,14 @@ async fn a_narrower_filter_answers_only_what_it_takes(pool: PgPool) {
         .unwrap();
     assert_eq!((poison.outbox.pending, poison.outbox.parked), (0, 1));
     assert_eq!(poison.stream.as_ref().unwrap().messages, 0);
+    assert!(poison.streams.is_none());
     broker.done().await;
 }
 
 #[sqlx::test(migrations = false)]
 async fn a_filter_not_under_the_prefix_is_refused(pool: PgPool) {
     let (broker, events) = known(&pool).await;
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     for filter in [
         "other.>".to_owned(),
         ">".to_owned(),
@@ -186,7 +282,7 @@ async fn without_the_stream_the_status_says_why(pool: PgPool) {
     let (broker, events) = known(&pool).await;
     broker
         .jetstream
-        .delete_stream(&broker.settings.stream)
+        .delete_stream(&broker.settings.main.name)
         .await
         .unwrap();
     let status = events.status(&Filter::all()).await.unwrap();
@@ -205,7 +301,7 @@ async fn recent_reads_the_last_messages_and_leaves_nothing(pool: PgPool) {
         .collect();
     emit_each(&pool, &all).await;
     while events.pass_now().await.unwrap().unwrap() > 0 {}
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     let n = |recent: &Recent| -> Vec<u64> {
         recent
             .messages
@@ -249,7 +345,7 @@ async fn recent_reads_the_last_messages_and_leaves_nothing(pool: PgPool) {
     // Not a consumer left on the broker, durable or not.
     let left: Vec<String> = broker
         .jetstream
-        .get_stream(&broker.settings.stream)
+        .get_stream(&broker.settings.main.name)
         .await
         .unwrap()
         .consumer_names()
@@ -269,14 +365,20 @@ async fn recent_reads_the_last_messages_and_leaves_nothing(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn the_json_a_dashboard_reads_is_the_contract(pool: PgPool) {
     let (broker, events) = known(&pool).await;
-    let prefix = broker.settings.subject_prefix.clone();
+    let prefix = broker.settings.main.subject_prefix.clone();
     let all = events.status(&Filter::all()).await.unwrap();
     let north = events
         .status(&Filter::subject(format!("{prefix}.orders.north.>")))
         .await
         .unwrap();
     let recent = events.recent(&Filter::all(), 10).await.unwrap();
-    let mut stable = Stable::new(&broker.settings.stream, &prefix);
+    let live = broker.stream("live");
+    let mut stable = Stable::new(&[
+        (broker.settings.main.name.as_str(), "SHOP_EVENTS"),
+        (prefix.as_str(), "shop_events"),
+        (live.name.as_str(), "SHOP_LIVE"),
+        (live.subject_prefix.as_str(), "shop_live"),
+    ]);
     for (file, ty, value) in [
         ("status", "Status", serde_json::to_value(&all).unwrap()),
         ("narrowed", "Status", serde_json::to_value(&north).unwrap()),
@@ -323,6 +425,7 @@ fn the_dashboards_types_are_generated_from_these() {
         (Outbox::docs(), Outbox::decl(&cfg)),
         (Parked::docs(), Parked::decl(&cfg)),
         (Relay::docs(), Relay::decl(&cfg)),
+        (StreamOutbox::docs(), StreamOutbox::decl(&cfg)),
         (Stream::docs(), Stream::decl(&cfg)),
         (SubjectCount::docs(), SubjectCount::decl(&cfg)),
         (Consumer::docs(), Consumer::decl(&cfg)),
@@ -379,19 +482,21 @@ async fn a_filter_is_a_pattern_postgresql_matches(pool: PgPool) {
 
 /// Ids, times, days and the test's own names made stable: each id the same
 /// placeholder wherever it appears, in the order it first does; every time
-/// and every day one moment; the stream and prefix the shop's.
+/// and every day one moment; the streams' names and prefixes the shop's.
 pub(crate) struct Stable {
     ids: BTreeMap<String, String>,
-    stream: String,
-    prefix: String,
+    /// Each name of the test's, and the shop's name for it.
+    names: Vec<(String, String)>,
 }
 
 impl Stable {
-    pub(crate) fn new(stream: &str, prefix: &str) -> Self {
+    pub(crate) fn new(names: &[(&str, &str)]) -> Self {
         Stable {
             ids: BTreeMap::new(),
-            stream: stream.to_owned(),
-            prefix: prefix.to_owned(),
+            names: names
+                .iter()
+                .map(|(test, shop)| ((*test).to_owned(), (*shop).to_owned()))
+                .collect(),
         }
     }
 
@@ -422,9 +527,10 @@ impl Stable {
         if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
             return "2027-01-15".to_owned();
         }
-        let mut out = s
-            .replace(&self.stream, "SHOP_EVENTS")
-            .replace(&self.prefix, "shop_events");
+        let mut out = s.to_owned();
+        for (test, shop) in &self.names {
+            out = out.replace(test, shop);
+        }
         let mut at = 0;
         while let Some(found) = out.get(at..).and_then(|rest| {
             rest.char_indices()

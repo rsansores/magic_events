@@ -6,7 +6,10 @@ use sqlx::PgConnection;
 
 /// The steps, in order, each as released and never edited: the `n`th (from
 /// 1) brings the tables from version `n - 1` to `n`.
-const MIGRATIONS: [&str; SCHEMA_VERSION as usize] = [include_str!("../sql/postgres/1.sql")];
+const MIGRATIONS: [&str; SCHEMA_VERSION as usize] = [
+    include_str!("../sql/postgres/1.sql"),
+    include_str!("../sql/postgres/2.sql"),
+];
 
 /// Installs and upgrades one process at a time ("EVNTINST").
 const INSTALL_LOCK: i64 = 0x4556_4e54_494e_5354;

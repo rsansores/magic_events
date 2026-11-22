@@ -2,18 +2,19 @@
 //! waits in the outbox and since when, what was set aside and why, whether a
 //! relay runs, what the stream holds, and how far behind each consumer is.
 //!
-//! Every read takes a [`Filter`], a subject filter under the settings'
+//! Every read takes a [`Filter`]: one stream, and a subject filter under its
 //! prefix, so a host shows each viewer what is theirs and nothing else. What
 //! cannot be narrowed by subject — each consumer's lag, the counts of what
-//! was published per day — is answered only for [`Filter::all`]: show it on
-//! an operator's view.
+//! was published per day, every stream's outbox — is answered only for
+//! every subject of a stream ([`Filter::all`], [`Filter::stream`]): show it
+//! on an operator's view.
 //!
 //! Every answer serializes as the JSON of contract [`CONTRACT`], and carries
 //! that number: the dashboard package reads it.
 
 use crate::relay::LOCK_KEY;
-use crate::settings::{is_token, Settings};
-use crate::stream::covers;
+use crate::settings::{is_token, Declared, Settings};
+use crate::stream::{covers, subjects};
 use crate::Error;
 use async_nats::jetstream::consumer::{pull::OrderedConfig, DeliverPolicy};
 use async_nats::jetstream::Context;
@@ -46,49 +47,119 @@ const PUBLISHED_DAYS: i32 = 30;
 /// could not be reached.
 const BROKER_WAIT: Duration = Duration::from_secs(5);
 
-/// Which subjects a read covers: every one under the settings' prefix, or
-/// those a subject filter under it takes.
+/// Which stream a read covers, and which of its subjects: every one under
+/// its prefix, or those a subject filter under it takes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filter {
+    stream: Option<String>,
     subject: Option<String>,
 }
 
 impl Filter {
-    /// Every subject under the prefix: the operator's view, the only one
-    /// that answers the consumers and the published counts.
+    /// Every subject of the main stream: the operator's view, the only one —
+    /// with [`Filter::stream`] — that answers the consumers, the published
+    /// counts and every stream's outbox.
     #[must_use]
     pub fn all() -> Self {
-        Filter { subject: None }
+        Filter {
+            stream: None,
+            subject: None,
+        }
+    }
+
+    /// Every subject of the stream `key` declares
+    /// ([`Settings::stream`]): its operator's view.
+    #[must_use]
+    pub fn stream(key: impl Into<String>) -> Self {
+        Filter {
+            stream: Some(key.into()),
+            subject: None,
+        }
     }
 
     /// The subjects `filter` takes — tokens joined by dots, `*` for any one
     /// token, `>` last for the rest — written in full, prefix included:
-    /// `"shop.orders.north.>"`.
+    /// `"shop.orders.north.>"`. The stream is the one whose prefix it is
+    /// under.
     #[must_use]
     pub fn subject(filter: impl Into<String>) -> Self {
         Filter {
+            stream: None,
             subject: Some(filter.into()),
         }
     }
 
-    /// The filter in full, checked against `settings`' prefix.
-    pub(crate) fn resolve(&self, settings: &Settings) -> Result<String, Error> {
-        let all = crate::stream::subjects(settings);
+    /// The stream and the subjects the filter covers, checked against
+    /// `settings`' streams.
+    pub(crate) fn resolve<'a>(&self, settings: &'a Settings) -> Result<Scope<'a>, Error> {
         let Some(subject) = &self.subject else {
-            return Ok(all);
+            let key = self.stream.as_deref().unwrap_or_default();
+            let declared = settings.find(key).ok_or_else(|| {
+                Error::Misuse(format!(
+                    "no stream `{key}` is declared: a filter takes the key of a stream \
+                     `Settings::stream` declares"
+                ))
+            })?;
+            return Ok(Scope {
+                declared,
+                subject: subjects(declared.stream),
+                all: true,
+            });
         };
         let tokens: Vec<&str> = subject.split('.').collect();
         let valid = tokens
             .iter()
             .enumerate()
             .all(|(i, t)| is_token(t) || *t == "*" || (*t == ">" && i == tokens.len() - 1));
-        if !valid || !covers(&all, subject) {
+        let declared = settings
+            .declared()
+            .find(|d| covers(&subjects(d.stream), subject))
+            .filter(|_| valid);
+        let Some(declared) = declared else {
+            let prefixes: Vec<String> = settings.declared().map(|d| subjects(d.stream)).collect();
             return Err(Error::Misuse(format!(
-                "`{subject}` is no subject filter under `{all}`: tokens joined by dots, `*` for \
-                 any one, `>` last for the rest"
+                "`{subject}` is no subject filter under a stream's prefix ({}): tokens joined \
+                 by dots, `*` for any one, `>` last for the rest",
+                prefixes.join(", ")
             )));
-        }
-        Ok(subject.clone())
+        };
+        Ok(Scope {
+            declared,
+            // `Filter::subject("<prefix>.>")` is every subject, as
+            // `Filter::stream` is.
+            all: *subject == subjects(declared.stream),
+            subject: subject.clone(),
+        })
+    }
+}
+
+/// What a [`Filter`] covers: one declared stream, and a subject filter in
+/// full under its prefix — every subject of it, or fewer.
+pub(crate) struct Scope<'a> {
+    pub(crate) declared: Declared<'a>,
+    pub(crate) subject: String,
+    /// Whether it is every subject under the stream's prefix: then there is
+    /// no pattern to match, and the reads that cannot be narrowed answer.
+    pub(crate) all: bool,
+}
+
+impl Scope<'_> {
+    /// The regular expression a row's subject — what follows the prefix —
+    /// matches when the scope takes it: `None` for every subject.
+    pub(crate) fn pattern(&self) -> Option<String> {
+        // A narrower filter starts with the prefix's tokens (`resolve` holds
+        // it to that), and a row's subject is what follows them.
+        (!self.all).then(|| {
+            let skip = self.declared.stream.subject_prefix.split('.').count();
+            pattern(
+                &self
+                    .subject
+                    .split('.')
+                    .skip(skip)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            )
+        })
     }
 }
 
@@ -116,21 +187,27 @@ fn pattern(filter: &str) -> String {
 }
 
 /// What `Events::status` answers: the relay, the outbox and the
-/// stream, as one filter sees them.
+/// stream, as one filter sees them — of one stream.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct Status {
     /// The contract this answer serializes as: `CONTRACT`.
     pub contract: u32,
+    /// The key of the stream it covers: empty for the main one.
+    pub stream_key: String,
     /// The subject filter it covers, in full.
     pub filter: String,
     /// The database's clock as it answered: what the ages are counted from.
     pub at: DateTime<Utc>,
     /// What waits in the outbox, under the filter.
     pub outbox: Outbox,
-    /// The relay, wherever it runs.
+    /// The relay of the stream, wherever it runs.
     pub relay: Relay,
+    /// Every stream of the outbox — each one declared, and one no longer
+    /// declared that still has rows — the main one first: only for every
+    /// subject.
+    pub streams: Option<Vec<StreamOutbox>>,
     /// What the stream holds under the filter; `None` when the broker could
     /// not be reached (`broker_error` says why).
     pub stream: Option<Stream>,
@@ -139,9 +216,33 @@ pub struct Status {
     /// Each durable consumer of the stream: only for every subject, since a
     /// consumer's lag is the whole stream's.
     pub consumers: Option<Vec<Consumer>>,
-    /// Messages published per day (UTC) and type, the last 30 days: only
-    /// for every subject, since they are counted by type alone.
+    /// Messages of the stream published per day (UTC) and type, the last 30
+    /// days: only for every subject, since they are counted by type alone.
     pub published: Option<Vec<Published>>,
+}
+
+/// One stream of the outbox: what waits for it, and how its relay does.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[non_exhaustive]
+pub struct StreamOutbox {
+    /// Its key: empty for the main stream.
+    pub key: String,
+    /// The JetStream stream the settings declare it as; `None` when they
+    /// declare it no longer: nothing publishes what waits for it.
+    pub name: Option<String>,
+    /// Rows waiting to be published, parked ones not counted.
+    pub pending: u64,
+    /// When the oldest of them was emitted.
+    pub oldest_pending_at: Option<DateTime<Utc>>,
+    /// Rows the broker refused for good, waiting for `unpark`.
+    pub parked: u64,
+    /// When the stream last acknowledged a message.
+    pub last_published_at: Option<DateTime<Utc>>,
+    /// Passes the broker failed in a row; 0 once one goes through.
+    pub failures: u32,
+    /// Why the last of them failed.
+    pub last_error: Option<String>,
 }
 
 /// What waits in the outbox.
@@ -184,16 +285,18 @@ pub struct Parked {
     pub parked_at: DateTime<Utc>,
 }
 
-/// The relay, wherever it runs.
+/// The relay of one stream, wherever it runs.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[non_exhaustive]
 pub struct Relay {
-    /// Whether a process holds the relay's lock now.
+    /// Whether a process holds the relay's lock now: one relay publishes
+    /// every stream.
     pub running: bool,
     /// When the stream last acknowledged a message.
     pub last_published_at: Option<DateTime<Utc>>,
-    /// Passes the broker failed in a row; 0 once one goes through.
+    /// Passes of the stream the broker failed in a row; 0 once one goes
+    /// through.
     pub failures: u32,
     /// Why the last of them failed.
     pub last_error: Option<String>,
@@ -274,6 +377,8 @@ pub struct Published {
 pub struct Recent {
     /// The contract this answer serializes as: `CONTRACT`.
     pub contract: u32,
+    /// The key of the stream it covers: empty for the main one.
+    pub stream_key: String,
     /// The subject filter it covers, in full.
     pub filter: String,
     /// The messages, oldest first.
@@ -346,14 +451,24 @@ struct RelayRow {
     retry_after: Option<DateTime<Utc>>,
 }
 
+/// A stream of the outbox, as the database reads it.
+#[derive(sqlx::FromRow)]
+struct StreamRow {
+    key: String,
+    pending: i64,
+    oldest_pending_at: Option<DateTime<Utc>>,
+    parked: i64,
+    last_published_at: Option<DateTime<Utc>>,
+    failures: i32,
+    last_error: Option<String>,
+}
+
 /// The database's part of a status, in one snapshot.
-async fn database(
-    pool: &PgPool,
-    settings: &Settings,
-    filter: &str,
-    all: bool,
-) -> Result<Status, Error> {
-    let prefix = settings.subject_prefix.as_str();
+async fn database(pool: &PgPool, settings: &Settings, scope: &Scope<'_>) -> Result<Status, Error> {
+    let (key, prefix) = (
+        scope.declared.key,
+        scope.declared.stream.subject_prefix.as_str(),
+    );
     let mut tx = pool.begin().await?;
     // The isolation level before anything else: it can only be set first.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -365,21 +480,18 @@ async fn database(
             .execute(&mut *tx)
             .await?;
     }
-    // Every subject under the prefix is every row: no pattern to match. A
-    // narrower filter starts with the prefix's tokens (`Filter::resolve`
-    // holds it to that), and a row's subject is what follows them.
-    let pattern = (!all).then(|| {
-        let skip = prefix.split('.').count();
-        pattern(&filter.split('.').skip(skip).collect::<Vec<_>>().join("."))
-    });
+    // Every subject under the prefix is every row of the stream: no pattern
+    // to match.
+    let pattern = scope.pattern();
     let (at, pending, oldest, parked): (DateTime<Utc>, i64, Option<DateTime<Utc>>, i64) =
         sqlx::query_as(
             "SELECT now(), \
                     count(*) FILTER (WHERE parked_at IS NULL), \
                     min(emitted_at) FILTER (WHERE parked_at IS NULL), \
                     count(*) FILTER (WHERE parked_at IS NOT NULL) \
-               FROM magic_events.outbox WHERE $1::text IS NULL OR subject ~ $1",
+               FROM magic_events.outbox WHERE stream = $1 AND ($2::text IS NULL OR subject ~ $2)",
         )
+        .bind(key)
         .bind(&pattern)
         .fetch_one(&mut *tx)
         .await?;
@@ -387,10 +499,11 @@ async fn database(
         "SELECT id, event_id, $1 || '.' || subject AS subject, type, attempts, last_error, \
                 emitted_at, parked_at \
            FROM magic_events.outbox \
-          WHERE parked_at IS NOT NULL AND ($2::text IS NULL OR subject ~ $2) \
-          ORDER BY id LIMIT $3",
+          WHERE stream = $2 AND parked_at IS NOT NULL AND ($3::text IS NULL OR subject ~ $3) \
+          ORDER BY id LIMIT $4",
     )
     .bind(prefix)
+    .bind(key)
     .bind(&pattern)
     .bind(PARKED_LISTED)
     .fetch_all(&mut *tx)
@@ -401,35 +514,46 @@ async fn database(
                    AND objsubid = 1 AND classid = ($1::bigint >> 32)::oid \
                    AND objid = ($1::bigint & 4294967295)::oid) AS running, \
                 last_published_at, failures, last_error, retry_after \
-           FROM magic_events.relay WHERE id = 1",
+           FROM magic_events.relay WHERE stream = $2",
     )
     .bind(LOCK_KEY)
+    .bind(key)
     .fetch_one(&mut *tx)
     .await?;
-    let published = if all {
-        let rows: Vec<(NaiveDate, String, i64)> = sqlx::query_as(
-            "SELECT day, type, count FROM magic_events.published \
-              WHERE day > (now() AT TIME ZONE 'UTC')::date - $1 ORDER BY day DESC, type",
+    let (streams, published) = if scope.all {
+        let streams: Vec<StreamRow> = sqlx::query_as(
+            "SELECT coalesce(r.stream, o.stream) AS key, \
+                    coalesce(o.pending, 0) AS pending, o.oldest_pending_at, \
+                    coalesce(o.parked, 0) AS parked, r.last_published_at, \
+                    coalesce(r.failures, 0) AS failures, r.last_error \
+               FROM magic_events.relay r \
+               FULL JOIN (SELECT stream, \
+                                 count(*) FILTER (WHERE parked_at IS NULL) AS pending, \
+                                 min(emitted_at) FILTER (WHERE parked_at IS NULL) AS oldest_pending_at, \
+                                 count(*) FILTER (WHERE parked_at IS NOT NULL) AS parked \
+                            FROM magic_events.outbox GROUP BY stream) o ON o.stream = r.stream \
+              ORDER BY 1",
         )
+        .fetch_all(&mut *tx)
+        .await?;
+        let published: Vec<(NaiveDate, String, i64)> = sqlx::query_as(
+            "SELECT day, type, count FROM magic_events.published \
+              WHERE stream = $1 AND day > (now() AT TIME ZONE 'UTC')::date - $2 \
+              ORDER BY day DESC, type",
+        )
+        .bind(key)
         .bind(PUBLISHED_DAYS)
         .fetch_all(&mut *tx)
         .await?;
-        Some(
-            rows.into_iter()
-                .map(|(day, ty, count)| Published {
-                    day,
-                    ty,
-                    count: count.unsigned_abs(),
-                })
-                .collect(),
-        )
+        (Some(streams), Some(published))
     } else {
-        None
+        (None, None)
     };
     tx.commit().await?;
     Ok(Status {
         contract: CONTRACT,
-        filter: filter.to_owned(),
+        stream_key: key.to_owned(),
+        filter: scope.subject.clone(),
         at,
         outbox: Outbox {
             pending: pending.unsigned_abs(),
@@ -456,10 +580,34 @@ async fn database(
             last_error: relay.last_error,
             retry_after: relay.retry_after,
         },
+        // A stream no longer declared is listed while rows wait for it.
+        streams: streams.map(|rows| {
+            rows.into_iter()
+                .map(|r| StreamOutbox {
+                    name: settings.find(&r.key).map(|d| d.stream.name.clone()),
+                    key: r.key,
+                    pending: r.pending.unsigned_abs(),
+                    oldest_pending_at: r.oldest_pending_at,
+                    parked: r.parked.unsigned_abs(),
+                    last_published_at: r.last_published_at,
+                    failures: u32::try_from(r.failures).unwrap_or(0),
+                    last_error: r.last_error,
+                })
+                .filter(|s| s.name.is_some() || s.pending > 0 || s.parked > 0)
+                .collect()
+        }),
         stream: None,
         broker_error: None,
         consumers: None,
-        published,
+        published: published.map(|rows| {
+            rows.into_iter()
+                .map(|(day, ty, count)| Published {
+                    day,
+                    ty,
+                    count: count.unsigned_abs(),
+                })
+                .collect()
+        }),
     })
 }
 
@@ -551,17 +699,17 @@ pub(crate) async fn status(
     settings: &Settings,
     filter: &Filter,
 ) -> Result<Status, Error> {
-    let subject = filter.resolve(settings)?;
-    // `Filter::subject("<prefix>.>")` is every subject, as `Filter::all()` is.
-    let all = subject == crate::stream::subjects(settings);
-    let mut status = crate::relay::bounded(
-        settings.database_timeout,
-        database(pool, settings, &subject, all),
-    )
-    .await?;
+    let scope = filter.resolve(settings)?;
+    let mut status =
+        crate::relay::bounded(settings.database_timeout, database(pool, settings, &scope)).await?;
     match tokio::time::timeout(
         BROKER_WAIT,
-        broker(jetstream, &settings.stream, &subject, all),
+        broker(
+            jetstream,
+            &scope.declared.stream.name,
+            &scope.subject,
+            scope.all,
+        ),
     )
     .await
     .unwrap_or_else(|_| Err(format!("the broker did not answer within {BROKER_WAIT:?}")))
@@ -585,28 +733,25 @@ pub(crate) async fn recent(
     filter: &Filter,
     limit: u32,
 ) -> Result<Recent, Error> {
-    let subject = filter.resolve(settings)?;
+    let scope = filter.resolve(settings)?;
+    let name = &scope.declared.stream.name;
     let limit = usize::try_from(limit.min(RECENT_MOST)).unwrap_or(usize::MAX);
     let read = async {
         let messages = if limit == 0 {
             Vec::new()
         } else {
-            last(jetstream, &settings.stream, &subject, limit).await?
+            last(jetstream, name, &scope.subject, limit).await?
         };
         Ok(Recent {
             contract: CONTRACT,
-            filter: subject.clone(),
+            stream_key: scope.declared.key.to_owned(),
+            filter: scope.subject.clone(),
             messages,
         })
     };
     tokio::time::timeout(RECENT_WAIT, read)
         .await
-        .unwrap_or_else(|_| {
-            Err(unread(
-                &settings.stream,
-                &format!("no answer within {RECENT_WAIT:?}"),
-            ))
-        })
+        .unwrap_or_else(|_| Err(unread(name, &format!("no answer within {RECENT_WAIT:?}"))))
 }
 
 /// How long `recent` may take, every round of it.

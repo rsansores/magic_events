@@ -1,8 +1,14 @@
 //! The relay: one process at a time, on an advisory lock, publishes what
-//! committed, in id order, and deletes what the stream acknowledged.
+//! committed, in id order within each stream, and deletes what the stream
+//! acknowledged.
 //!
-//! A pass reads a batch of pending rows, publishes them outside any
-//! transaction — up to `in_flight` sent and not acknowledged yet, the
+//! Each stream the settings declare has a lane of its own — its passes, its
+//! backoff, its failures — and the lanes run side by side on the one lock,
+//! taking turns on its connection for their statements: a stream whose
+//! broker fails or is slow waits alone.
+//!
+//! A pass reads a batch of one stream's pending rows, publishes them outside
+//! any transaction — up to `in_flight` sent and not acknowledged yet, the
 //! acknowledgements awaited in order — then, in one transaction fenced on
 //! the lock, deletes the acknowledged prefix and counts it. The pass stops
 //! at the first message the broker did not take:
@@ -21,13 +27,14 @@
 
 use crate::envelope::Pending;
 use crate::publish::{Ack, Failure, Publish};
-use crate::settings::Settings;
+use crate::settings::{Declared, Settings};
 use crate::Error;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{watch, Mutex};
 
 /// The advisory lock only the running relay holds ("EVNTRLAY").
 pub(crate) const LOCK_KEY: i64 = 0x4556_4e54_524c_4159;
@@ -223,32 +230,67 @@ impl Relay {
     }
 
     /// The relay, for as long as this process holds `lock`: `None` once it
-    /// lost it, or the lock back when `shutdown` resolved — between passes,
-    /// never inside one.
+    /// lost it, or the lock back when `shutdown` resolved — every lane
+    /// between passes, never inside one.
     async fn lead<F: Future<Output = ()>>(
         &self,
-        mut lock: Lock,
+        lock: Lock,
         shutdown: &mut std::pin::Pin<&mut F>,
     ) -> Option<Lock> {
         tracing::info!("events: this process runs the relay");
+        let lock = Mutex::new(lock);
+        // Set once the relay stops leading — stopped, or its lock lost — so
+        // every lane ends after the pass it is in.
+        let (stop, _) = watch::channel(false);
+        let lost = {
+            let lanes = futures_util::future::join(
+                futures_util::future::join_all(
+                    self.settings
+                        .declared()
+                        .map(|declared| self.lane(&lock, declared, &stop)),
+                ),
+                self.pruning(&lock, &stop),
+            );
+            tokio::pin!(lanes);
+            tokio::select! {
+                biased;
+                () = &mut *shutdown => {
+                    stop.send_replace(true);
+                    (&mut lanes).await.0
+                }
+                (lost, ()) = &mut lanes => lost,
+            }
+        };
+        if lost.contains(&true) {
+            return None;
+        }
+        Some(lock.into_inner())
+    }
+
+    /// One stream's passes, until `stop` is set: answers whether it ended
+    /// for the lock lost, which it then sets `stop` for.
+    async fn lane(
+        &self,
+        lock: &Mutex<Lock>,
+        declared: Declared<'_>,
+        stop: &watch::Sender<bool>,
+    ) -> bool {
+        let mut stopping = stop.subscribe();
+        let name = &declared.stream.name;
         let (first, max) = self.settings.backoff;
         let mut backoff = first;
-        let mut prune_at = tokio::time::Instant::now();
         loop {
-            if futures_util::FutureExt::now_or_never(&mut *shutdown).is_some() {
-                return Some(lock);
+            if *stopping.borrow() {
+                return false;
             }
-            if !lock.still_held().await {
-                tracing::error!("events: the relay's lock is gone, or its database does not answer — standing by");
-                return None;
-            }
-            if tokio::time::Instant::now() >= prune_at {
-                if let Err(e) = self.prune(&mut lock).await {
-                    tracing::warn!("events: pruning the published counts failed: {e}");
+            if !lock.lock().await.still_held().await {
+                // The first lane to find it gone says so.
+                if !stop.send_replace(true) {
+                    tracing::error!("events: the relay's lock is gone, or its database does not answer — standing by");
                 }
-                prune_at = tokio::time::Instant::now() + PRUNE_EVERY;
+                return true;
             }
-            let wait = match self.pass(&mut lock, backoff).await {
+            let wait = match self.pass(lock, declared, backoff).await {
                 Ok(0) => {
                     backoff = first;
                     self.settings.idle
@@ -259,11 +301,9 @@ impl Relay {
                 }
                 Err(e) => {
                     if matches!(e, Error::Misuse(_)) {
-                        tracing::error!(
-                            "events: a pass failed, and runs again in {backoff:?}: {e}"
-                        );
+                        tracing::error!(stream = %name, "events: a pass failed, and runs again in {backoff:?}: {e}");
                     } else {
-                        tracing::warn!("events: a pass failed, and runs again in {backoff:?}: {e}");
+                        tracing::warn!(stream = %name, "events: a pass failed, and runs again in {backoff:?}: {e}");
                     }
                     let wait = backoff;
                     backoff = backoff.saturating_mul(2).min(max);
@@ -271,8 +311,23 @@ impl Relay {
                 }
             };
             tokio::select! {
-                () = &mut *shutdown => return Some(lock),
+                _ = stopping.wait_for(|stop| *stop) => return false,
                 () = tokio::time::sleep(wait) => {}
+            }
+        }
+    }
+
+    /// Forgets the published counts past `PUBLISHED_KEPT_DAYS` now and every
+    /// `PRUNE_EVERY`, until `stop` is set.
+    async fn pruning(&self, lock: &Mutex<Lock>, stop: &watch::Sender<bool>) {
+        let mut stopping = stop.subscribe();
+        loop {
+            if let Err(e) = self.prune(&mut *lock.lock().await).await {
+                tracing::warn!("events: pruning the published counts failed: {e}");
+            }
+            tokio::select! {
+                _ = stopping.wait_for(|stop| *stop) => return,
+                () = tokio::time::sleep(PRUNE_EVERY) => {}
             }
         }
     }
@@ -292,26 +347,40 @@ impl Relay {
         .await
     }
 
-    /// One pass, as the relay holding `lock`: answers how many rows it
+    /// One pass of the stream `declared`, as the relay holding `lock` —
+    /// shared with the other streams' lanes, which take turns on its
+    /// connection while this one publishes: answers how many rows it
     /// published or parked. `backoff` is how long the relay waits if the
     /// broker fails it, which the status shows.
-    pub(crate) async fn pass(&self, lock: &mut Lock, backoff: Duration) -> Result<usize, Error> {
-        let mut rows = self.pending(lock).await?;
+    pub(crate) async fn pass(
+        &self,
+        lock: &Mutex<Lock>,
+        declared: Declared<'_>,
+        backoff: Duration,
+    ) -> Result<usize, Error> {
+        let mut rows = self.pending(&mut *lock.lock().await, declared).await?;
         if rows.is_empty() {
             return Ok(0);
         }
-        let published = self.send(&mut rows).await;
-        self.settle(lock, &rows, published, backoff).await
+        let published = self.send(declared, &mut rows).await;
+        self.settle(&mut *lock.lock().await, declared, &rows, published, backoff)
+            .await
     }
 
-    /// The next batch of rows to publish, in order.
-    pub(crate) async fn pending(&self, lock: &mut Lock) -> Result<Vec<Pending>, Error> {
+    /// The next batch of the stream's rows to publish, in order.
+    pub(crate) async fn pending(
+        &self,
+        lock: &mut Lock,
+        declared: Declared<'_>,
+    ) -> Result<Vec<Pending>, Error> {
         bounded(lock.wait, async {
             let mut tx = lock.fenced().await?;
             let rows = sqlx::query_as::<_, Pending>(
                 "SELECT id, event_id, subject, type, headers, body, emitted_at \
-                   FROM magic_events.outbox WHERE parked_at IS NULL ORDER BY id LIMIT $1",
+                   FROM magic_events.outbox WHERE stream = $1 AND parked_at IS NULL \
+                  ORDER BY id LIMIT $2",
             )
+            .bind(declared.key)
             .bind(i64::from(self.settings.batch))
             .fetch_all(&mut *tx)
             .await?;
@@ -325,7 +394,7 @@ impl Relay {
     /// acknowledged at once, each within `send_timeout`; stops sending at the
     /// first failure, and still awaits what was sent before it. Each row's
     /// body goes with its message, and is gone from the row after.
-    pub(crate) async fn send(&self, rows: &mut [Pending]) -> Published {
+    pub(crate) async fn send(&self, declared: Declared<'_>, rows: &mut [Pending]) -> Published {
         let in_flight = usize::try_from(self.settings.in_flight).unwrap_or(usize::MAX);
         let timeout = self.settings.send_timeout;
         let late = || Failure::transient(format!("no acknowledgement within {timeout:?}"));
@@ -335,7 +404,7 @@ impl Relay {
         loop {
             while published.failure.is_none() && next < rows.len() && waiting.len() < in_flight {
                 let row = &mut rows[next];
-                let message = row.message(&self.settings.subject_prefix, &self.settings.source);
+                let message = row.message(&declared.stream.subject_prefix, &self.settings.source);
                 let body = std::mem::take(&mut row.body);
                 let sent = tokio::time::timeout(timeout, self.publish.send(message, body))
                     .await
@@ -370,32 +439,36 @@ impl Relay {
     pub(crate) async fn settle(
         &self,
         lock: &mut Lock,
+        declared: Declared<'_>,
         rows: &[Pending],
         published: Published,
         backoff: Duration,
     ) -> Result<usize, Error> {
         let wait = lock.wait;
-        bounded(wait, self.record(lock, rows, published, backoff)).await
+        bounded(wait, self.record(lock, declared, rows, published, backoff)).await
     }
 
     /// `settle`, with no bound on how long the database takes.
     async fn record(
         &self,
         lock: &mut Lock,
+        declared: Declared<'_>,
         rows: &[Pending],
         published: Published,
         backoff: Duration,
     ) -> Result<usize, Error> {
+        let key = declared.key;
         let acked: Vec<i64> = rows[..published.acked].iter().map(|r| r.id).collect();
         let mut tx = lock.fenced().await?;
         if !acked.is_empty() {
             sqlx::query(
                 "WITH gone AS (DELETE FROM magic_events.outbox WHERE id = ANY($1) RETURNING type) \
-                 INSERT INTO magic_events.published AS p (day, type, count) \
-                 SELECT (now() AT TIME ZONE 'UTC')::date, type, count(*) FROM gone GROUP BY type \
-                 ON CONFLICT (day, type) DO UPDATE SET count = p.count + excluded.count",
+                 INSERT INTO magic_events.published AS p (stream, day, type, count) \
+                 SELECT $2, (now() AT TIME ZONE 'UTC')::date, type, count(*) FROM gone GROUP BY type \
+                 ON CONFLICT (stream, day, type) DO UPDATE SET count = p.count + excluded.count",
             )
             .bind(&acked)
+            .bind(key)
             .execute(&mut *tx)
             .await?;
         }
@@ -404,8 +477,9 @@ impl Relay {
             None => {
                 sqlx::query(
                     "UPDATE magic_events.relay SET last_published_at = now(), failures = 0, \
-                       last_error = NULL, retry_after = NULL WHERE id = 1",
+                       last_error = NULL, retry_after = NULL WHERE stream = $1",
                 )
+                .bind(key)
                 .execute(&mut *tx)
                 .await?;
                 Ok(())
@@ -415,11 +489,12 @@ impl Relay {
                     "UPDATE magic_events.relay SET failures = failures + 1, last_error = $1, \
                        retry_after = now() + make_interval(secs => $2), \
                        last_published_at = CASE WHEN $3 THEN now() ELSE last_published_at END \
-                     WHERE id = 1",
+                     WHERE stream = $4",
                 )
                 .bind(&failure.reason)
                 .bind(backoff.as_secs_f64())
                 .bind(done > 0)
+                .bind(key)
                 .execute(&mut *tx)
                 .await?;
                 Err(Error::Broker {
@@ -444,6 +519,7 @@ impl Relay {
                 .unwrap_or(false);
                 if parked {
                     tracing::error!(
+                        stream = %declared.stream.name,
                         id = row.id,
                         event = %row.event_id,
                         subject = %row.subject,
@@ -454,6 +530,7 @@ impl Relay {
                     done += 1;
                 } else {
                     tracing::warn!(
+                        stream = %declared.stream.name,
                         id = row.id,
                         error = %failure.reason,
                         "events: the broker refuses a message — it is tried again"
@@ -461,9 +538,10 @@ impl Relay {
                 }
                 sqlx::query(
                     "UPDATE magic_events.relay SET last_published_at = \
-                       CASE WHEN $1 THEN now() ELSE last_published_at END WHERE id = 1",
+                       CASE WHEN $1 THEN now() ELSE last_published_at END WHERE stream = $2",
                 )
                 .bind(published.acked > 0)
+                .bind(key)
                 .execute(&mut *tx)
                 .await?;
                 Ok(())

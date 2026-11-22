@@ -1,7 +1,10 @@
-//! The walk: writers commit and roll back at random while relays start,
-//! stop, crash and lose their connection under them; afterwards the stream
-//! holds exactly what committed — nothing lost, nothing twice, each
-//! transaction's events in the order it emitted them.
+//! The walk: writers commit and roll back at random, each transaction's
+//! events going to two streams, while relays start, stop, crash and lose
+//! their connection under them, and one of the streams refuses everything
+//! for a while; afterwards each stream holds exactly what committed to it —
+//! nothing lost, nothing twice, each transaction's events in the order it
+//! emitted them — and the other stream went on publishing while the one
+//! refused.
 //!
 //! Each walk takes a seed, which decides what every writer and the killer
 //! do (the timing is the machine's). The walks take the seeds in [`SEEDS`];
@@ -9,8 +12,9 @@
 //! `random` — and each walk prints the seed it took. A seed worth keeping
 //! joins `SEEDS` with its fix.
 
-use crate::tests::{count, until, Broker, Shipped};
+use crate::tests::{count, until, Broker, Seen, Shipped};
 use crate::Events;
+use async_nats::jetstream::stream::DiscardPolicy;
 use sqlx::PgPool;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -54,22 +58,25 @@ fn seeds() -> Vec<u64> {
     }
 }
 
-/// Each committed transaction's events, in emit order.
-type Committed = Arc<Mutex<Vec<Vec<Uuid>>>>;
+/// Each committed transaction's events, in emit order: each one's stream
+/// key and id.
+type Committed = Arc<Mutex<Vec<Vec<(&'static str, Uuid)>>>>;
 
-/// One writer: `TRANSACTIONS` transactions of one to five events each,
-/// three in four committed.
+/// One writer: `TRANSACTIONS` transactions of one to five events each, to
+/// the main stream or to `live`, three in four committed.
 async fn write(pool: PgPool, seed: u64, writer: u64, committed: Committed) {
     let mut walk = Walk(seed ^ (writer + 1).wrapping_mul(0x9E37_79B9));
     for tx_n in 0..TRANSACTIONS {
         let mut tx = pool.begin().await.unwrap();
         let mut ids = Vec::new();
         for k in 0..=walk.below(5) {
-            let event = Shipped {
-                store: format!("w{writer}"),
-                n: tx_n * 10 + k,
+            let (store, n) = (format!("w{writer}"), tx_n * 10 + k);
+            let id = if walk.below(2) == 0 {
+                ("", crate::emit(&mut tx, &Shipped { store, n }).await)
+            } else {
+                ("live", crate::emit(&mut tx, &Seen { store, n }).await)
             };
-            ids.push(crate::emit(&mut tx, &event).await.unwrap());
+            ids.push((id.0, id.1.unwrap()));
         }
         tokio::time::sleep(Duration::from_millis(walk.below(4))).await;
         if walk.below(4) == 0 {
@@ -118,18 +125,59 @@ async fn kill(pool: PgPool, broker: &Broker, seed: u64, writing: Arc<Mutex<bool>
     ended
 }
 
+/// Has the stream `live` refuse every message — full, and discarding what
+/// is new — until the main stream has published while the relay counts
+/// `live`'s failures, then take messages again. A deleted stream would be
+/// made again by the next relay that starts; a full one is left as it is.
+async fn refuse_for_a_while(pool: &PgPool, broker: &Broker) {
+    let name = &broker.stream("live").name;
+    let set = |max_messages: i64, discard: DiscardPolicy| async move {
+        let mut stream = broker.jetstream.get_stream(name).await.unwrap();
+        let mut config = stream.info().await.unwrap().config.clone();
+        config.max_messages = max_messages;
+        config.discard = discard;
+        broker.jetstream.update_stream(&config).await.unwrap();
+    };
+    set(1, DiscardPolicy::New).await;
+    let before = broker.messages().await.len();
+    until("the main stream publishes while `live` refuses", || async {
+        broker.messages().await.len() > before
+            && count(
+                pool,
+                "SELECT failures::bigint FROM magic_events.relay WHERE stream = 'live'",
+            )
+            .await
+                > 0
+    })
+    .await;
+    set(-1, DiscardPolicy::Old).await;
+}
+
 async fn walk(pool: &PgPool, seed: u64) {
     eprintln!("walk: seed {seed} (MAGIC_EVENTS_WALK_SEEDS={seed} takes it again)");
-    let broker = Broker::new().await;
+    let broker = Broker::live().await;
+    // Both streams declared, as a host's first start does, before anything
+    // emits to them.
+    Events::start(
+        pool.clone(),
+        broker.jetstream.clone(),
+        broker.settings.clone(),
+    )
+    .await
+    .unwrap()
+    .stop()
+    .await;
     let committed: Committed = Arc::default();
     let writing = Arc::new(Mutex::new(true));
     let writers = (0..WRITERS)
         .map(|writer| tokio::spawn(write(pool.clone(), seed, writer, committed.clone())));
     let writers = futures_join(writers.collect());
     let killer = kill(pool.clone(), &broker, seed, writing.clone());
+    // The relays keep starting and ending until the writers are done and
+    // `live` took messages again.
     let ((), ended) = tokio::join!(
         async {
-            writers.await;
+            tokio::join!(writers, refuse_for_a_while(pool, &broker));
             *writing.lock().unwrap() = false;
         },
         killer
@@ -148,32 +196,51 @@ async fn walk(pool: &PgPool, seed: u64) {
     .await;
     last.stop().await;
 
-    let held: Vec<String> = broker.messages().await.into_iter().map(|m| m.id).collect();
     let committed = committed.lock().unwrap().clone();
-    let wanted: BTreeSet<String> = committed.iter().flatten().map(Uuid::to_string).collect();
-    let unique: BTreeSet<String> = held.iter().cloned().collect();
-    assert_eq!(
-        unique.len(),
-        held.len(),
-        "seed {seed}: a message held twice"
-    );
-    assert_eq!(
-        unique, wanted,
-        "seed {seed}: the stream is not what committed"
-    );
-    let at: HashMap<&str, usize> = held
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.as_str(), i))
-        .collect();
-    for ids in &committed {
-        let places: Vec<usize> = ids.iter().map(|id| at[id.to_string().as_str()]).collect();
+    for key in ["", "live"] {
+        let held: Vec<String> = broker
+            .messages_of(key)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        let wanted: BTreeSet<String> = committed
+            .iter()
+            .flatten()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, id)| id.to_string())
+            .collect();
+        let unique: BTreeSet<String> = held.iter().cloned().collect();
+        assert_eq!(
+            unique.len(),
+            held.len(),
+            "seed {seed}: a message held twice on `{key}`"
+        );
+        assert_eq!(
+            unique, wanted,
+            "seed {seed}: the stream `{key}` is not what committed to it"
+        );
+        let at: HashMap<&str, usize> = held
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        for ids in &committed {
+            let places: Vec<usize> = ids
+                .iter()
+                .filter(|(k, _)| *k == key)
+                .map(|(_, id)| at[id.to_string().as_str()])
+                .collect();
+            assert!(
+                places.windows(2).all(|w| w[0] < w[1]),
+                "seed {seed}: a transaction's events out of emit order on `{key}`: {places:?}"
+            );
+        }
         assert!(
-            places.windows(2).all(|w| w[0] < w[1]),
-            "seed {seed}: a transaction's events out of emit order: {places:?}"
+            !wanted.is_empty(),
+            "seed {seed}: nothing committed to `{key}`"
         );
     }
-    assert!(!committed.is_empty());
     eprintln!(
         "walk: seed {seed}: {} transactions committed, {ended} relays ended",
         committed.len()

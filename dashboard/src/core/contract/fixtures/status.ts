@@ -76,5 +76,28 @@ export default {
       }
     ],
     "subjects_total": 2
-  }
+  },
+  "stream_key": "",
+  "streams": [
+    {
+      "failures": 0,
+      "key": "",
+      "last_error": null,
+      "last_published_at": "2027-01-15T08:00:00.123456Z",
+      "name": "SHOP_EVENTS",
+      "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
+      "parked": 1,
+      "pending": 1
+    },
+    {
+      "failures": 0,
+      "key": "live",
+      "last_error": null,
+      "last_published_at": "2027-01-15T08:00:00.123456Z",
+      "name": "SHOP_LIVE",
+      "oldest_pending_at": "2027-01-15T08:00:00.123456Z",
+      "parked": 0,
+      "pending": 1
+    }
+  ]
 } satisfies Status

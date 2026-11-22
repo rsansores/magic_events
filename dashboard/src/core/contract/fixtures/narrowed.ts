@@ -34,5 +34,7 @@ export default {
       }
     ],
     "subjects_total": 1
-  }
+  },
+  "stream_key": "",
+  "streams": null
 } satisfies Status

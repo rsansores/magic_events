@@ -28,6 +28,17 @@ enum Catalog {
     ProductUpdated { store: String, ids: Vec<u64> },
 }
 
+#[derive(Serialize, crate::Event)]
+enum Screens {
+    #[event(
+        type = "order.seen",
+        version = 1,
+        subject = "orders.{store}.seen",
+        stream = "live"
+    )]
+    Seen { store: String, ids: Vec<u64> },
+}
+
 fn shipped(store: &str) -> OrderShipped {
     OrderShipped {
         store: store.to_owned(),
@@ -132,7 +143,7 @@ async fn a_body_over_the_relays_limit_is_refused_at_emit(pool: PgPool) {
         Err(Error::Invalid(why)) => assert!(why.contains("65536 at most"), "{why}"),
         other => panic!("{other:?}"),
     }
-    sqlx::query("UPDATE magic_events.relay SET max_body = 30")
+    sqlx::query("UPDATE magic_events.relay SET max_body = 30 WHERE stream = ''")
         .execute(&mut *conn)
         .await
         .unwrap();
@@ -151,4 +162,61 @@ async fn emit_needs_the_schema(pool: PgPool) {
         Err(Error::Database(e)) => assert!(e.to_string().contains("magic_events"), "{e}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// An event of a stream no relay declared would wait in the outbox with
+/// nothing to publish it: refused at the call, and nothing written.
+#[sqlx::test(migrations = false)]
+async fn an_event_of_a_stream_no_relay_declared_is_refused(pool: PgPool) {
+    Events::install(&pool).await.unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let seen = Screens::Seen {
+        store: "north".to_owned(),
+        ids: vec![1],
+    };
+    match emit(&mut conn, &seen).await {
+        Err(Error::Misuse(why)) => assert!(
+            why.contains("`order.seen.v1` goes to the stream `live`, which no relay declared")
+                && why.contains(r#"Settings::stream("live", …)"#),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(outbox(&pool).await.is_empty());
+}
+
+/// Each row says its stream — the main one by the empty key — and each
+/// stream holds bodies to its own `max_body`.
+#[sqlx::test(migrations = false)]
+async fn an_event_is_written_for_its_stream_and_held_to_its_limit(pool: PgPool) {
+    Events::install(&pool).await.unwrap();
+    sqlx::query("INSERT INTO magic_events.relay (stream, max_body) VALUES ('live', 40)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let seen = |n: usize| Screens::Seen {
+        store: "north".to_owned(),
+        ids: vec![1; n],
+    };
+    // `{"store":"north","ids":[` is 24 bytes, each id 2 but the last, and `]}` 2.
+    emit(&mut conn, &seen(7)).await.unwrap();
+    match emit(&mut conn, &seen(8)).await {
+        Err(Error::Invalid(why)) => assert!(why.contains("40 at most"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // The main stream's limit is its own.
+    emit(&mut conn, &shipped(&"x".repeat(100))).await.unwrap();
+    let streams: Vec<(String, String)> =
+        sqlx::query_as("SELECT stream, type FROM magic_events.outbox ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        streams,
+        [
+            ("live".to_owned(), "order.seen.v1".to_owned()),
+            (String::new(), "order.shipped.v1".to_owned())
+        ]
+    );
 }
